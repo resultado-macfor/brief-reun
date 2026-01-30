@@ -8,6 +8,7 @@ import PyPDF2
 import docx
 import json
 import re
+import time
 
 # ============================================================================
 # CONFIGURAÇÃO INICIAL
@@ -107,7 +108,9 @@ if not st.session_state.authenticated:
 # ============================================================================
 try:
     genai.configure(api_key=gemini_api_key)
-    gemini_model = genai.GenerativeModel('gemini-2.5-pro')
+    # Gemini 1.5 Flash para vídeo/análise multimodal
+    gemini_model = genai.GenerativeModel('gemini-1.5-flash')
+    st.success("✅ Gemini 1.5 Flash configurado com sucesso!")
 except Exception as e:
     st.error(f"❌ Erro ao configurar Gemini: {str(e)}")
     st.stop()
@@ -162,88 +165,142 @@ def extract_text_from_file(file):
         return "Formato de arquivo não suportado"
 
 # ============================================================================
-# FUNÇÕES DE ANÁLISE DE VÍDEO COM GEMINI
+# FUNÇÕES DE ANÁLISE DE VÍDEO COM GEMINI (CORRIGIDAS)
 # ============================================================================
+def upload_and_wait_for_processing(video_path, max_retries=10, delay_seconds=5):
+    """Faz upload do vídeo e espera até estar processado"""
+    try:
+        # Fazer upload do arquivo
+        st.info("📤 Fazendo upload do vídeo para o Gemini...")
+        video_file = genai.upload_file(video_path)
+        
+        # Verificar estado do arquivo
+        retries = 0
+        while retries < max_retries:
+            try:
+                status_response = genai.get_file(video_file.name)
+                status = status_response.state.name
+                
+                if status == "ACTIVE":
+                    st.success("✅ Vídeo processado e pronto para análise!")
+                    return video_file
+                elif status == "FAILED":
+                    st.error("❌ Falha no processamento do vídeo")
+                    return None
+                else:
+                    st.info(f"⏳ Processando vídeo... ({status})")
+                    time.sleep(delay_seconds)
+                    retries += 1
+                    
+            except Exception as e:
+                st.warning(f"⚠️ Aguardando processamento... (tentativa {retries + 1}/{max_retries})")
+                time.sleep(delay_seconds)
+                retries += 1
+        
+        st.error("❌ Tempo esgotado no processamento do vídeo")
+        return None
+        
+    except Exception as e:
+        st.error(f"❌ Erro no upload do vídeo: {str(e)}")
+        return None
+
 def analyze_video_with_gemini(video_path, meeting_info=None):
     """Analisa vídeo de reunião usando Gemini 1.5 Flash"""
     
     try:
-        # Configurar safety settings para permitir análise de áudio/vídeo
+        # Configurar safety settings
         safety_settings = {
-            HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
-            HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
-            HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
-            HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
+            HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_ONLY_HIGH,
+            HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_ONLY_HIGH,
+            HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_ONLY_HIGH,
+            HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_ONLY_HIGH,
         }
         
         # Prompt para análise de vídeo
-        system_prompt = """Você é um especialista em análise de reuniões corporativas. 
+        system_prompt = """Você é um especialista em análise de reuniões corporativas com background em psicologia organizacional, gestão de projetos e comunicação eficaz. 
+        
         Analise este vídeo de reunião considerando:
-        1. Conteúdo verbal (o que é dito)
+        1. Conteúdo verbal (transcrição do que é dito)
         2. Tom de voz e entonação
-        3. Dinâmica entre participantes
-        4. Linguagem corporal quando visível
-        5. Engajamento dos participantes
+        3. Dinâmica entre participantes quando identificável
+        4. Estrutura da reunião
+        5. Clareza das comunicações
         
-        Forneça uma análise completa e estruturada."""
+        Forneça uma análise completa, prática e baseada em evidências observáveis."""
         
-        # Carregar o vídeo
-        video_file = genai.upload_file(video_path)
+        # Upload e espera pelo processamento
+        video_file = upload_and_wait_for_processing(video_path)
+        
+        if not video_file:
+            return "❌ Falha no processamento do vídeo. Tente novamente com um vídeo menor ou formato diferente."
         
         # Preparar prompt
         prompt_parts = [
             system_prompt,
-            "\nANALISE ESTE VÍDEO DE REUNIÃO:",
+            "\nANALISE ESTE VÍDEO DE REUNIÃO CORPORATIVA:",
             video_file,
         ]
         
         if meeting_info:
-            prompt_parts.append(f"\nINFORMAÇÕES ADICIONAIS:\n{meeting_info}")
+            prompt_parts.append(f"\nINFORMAÇÕES ADICIONAIS DA REUNIÃO:\n{meeting_info}")
         
         prompt_parts.append("""
-        FORNECE UMA ANÁLISE DETALHADA NO SEGUINTE FORMATO:
+        
+        FORNECER ANÁLISE NO SEGUINTE FORMATO DETALHADO:
         
         # 🎥 ANÁLISE DE VÍDEO DE REUNIÃO
         
         ## 📋 RESUMO EXECUTIVO
-        [Resumo de 3-4 parágrafos da reunião]
+        [Resumo de 2-3 parágrafos com os pontos mais importantes da reunião]
         
-        ## 🗣️ TRANSCRIÇÃO PRINCIPAL
-        [Transcrição dos pontos mais importantes discutidos]
+        ## 🗣️ TRANSCRIÇÃO DOS PONTOS PRINCIPAIS
+        [Transcrição dos momentos mais importantes discutidos - foco no conteúdo]
         
-        ## 👥 ANÁLISE DE PARTICIPANTES
-        ### [Participante 1 - quando identificável]
-        - **Participação:** [nível de participação]
-        - **Tom de voz:** [análise do tom]
-        - **Engajamento:** [análise do engajamento]
-        - **Contribuições:** [principais contribuições]
+        ## 👥 PARTICIPANTES E DINÂMICA
+        ### Participantes Identificados:
+        - [Liste os participantes quando identificáveis]
         
-        ## 🎭 DINÂMICA DA REUNIÃO
-        - **Clima geral:** [positivo, tenso, neutro, etc.]
-        - **Interações:** [como os participantes interagiram]
-        - **Liderança:** [quem liderou a reunião]
-        - **Conflitos:** [se houver conflitos observados]
+        ### Análise da Dinâmica:
+        - **Clima geral:** [positivo, tenso, neutro, colaborativo, etc.]
+        - **Interações principais:** [como os participantes interagiram]
+        - **Tom predominante:** [formal, informal, técnico, etc.]
+        - **Ritmo da reunião:** [rápido, moderado, lento, bem distribuído]
         
-        ## 🔊 ANÁLISE DE ÁUDIO
-        - **Clareza da comunicação:** [nível de entendimento]
-        - **Tom predominante:** [formal, informal, amigável, etc.]
-        - **Momentos-chave:** [momentos importantes pela entonação]
+        ## 🔊 ANÁLISE DE COMUNICAÇÃO
+        - **Clareza geral:** [nível de entendimento das comunicações]
+        - **Tom de voz observado:** [entonações, ênfases, variações]
+        - **Momentos-chave pela comunicação:** [momentos importantes pela forma como foram comunicados]
         
-        ## 👀 OBSERVAÇÕES VISUAIS (quando aplicável)
-        - **Linguagem corporal:** [observações relevantes]
-        - **Expressões faciais:** [expressões notáveis]
-        - **Engajamento visual:** [nível de atenção]
+        ## 🎯 CONTEÚDO E DECISÕES
+        ### Tópicos Principais Discutidos:
+        1. [Tópico 1]
+        2. [Tópico 2]
+        3. [Tópico 3]
+        
+        ### Decisões Tomadas:
+        - [Decisão 1]
+        - [Decisão 2]
+        
+        ### Ações Acordadas:
+        - [Ação 1] (Responsável: [se identificado], Prazo: [se mencionado])
+        - [Ação 2] (Responsável: [se identificado], Prazo: [se mencionado])
         
         ## 🚨 PONTOS DE ATENÇÃO
-        - [Lista de pontos que merecem atenção]
+        - [Lista de pontos que merecem atenção ou melhorias]
         
         ## 💡 RECOMENDAÇÕES
-        - [Sugestões para melhorias]
+        - [Sugestões práticas para melhorias em próximas reuniões]
         
         ## ⭐ AVALIAÇÃO FINAL
-        **Eficácia da reunião:** X/10
-        **Engajamento:** X/10
-        **Produtividade:** X/10
+        **Eficácia da comunicação:** X/10
+        **Clareza das decisões:** X/10  
+        **Engajamento observado:** X/10
+        **Média Geral:** X/10
+        
+        ### Observações Técnicas do Vídeo:
+        - Qualidade do áudio: [boa, média, ruim]
+        - Qualidade da imagem: [boa, média, ruim]
+        - Recomendações técnicas: [sugestões para melhor qualidade]
         """)
         
         # Gerar análise
@@ -251,13 +308,24 @@ def analyze_video_with_gemini(video_path, meeting_info=None):
             response = gemini_model.generate_content(
                 prompt_parts,
                 safety_settings=safety_settings,
-                generation_config={"temperature": 0.1}
+                generation_config={
+                    "temperature": 0.1,
+                    "top_p": 0.95,
+                    "top_k": 40,
+                    "max_output_tokens": 8192,
+                }
             )
         
         return response.text
         
     except Exception as e:
-        return f"❌ Erro na análise do vídeo: {str(e)}"
+        error_msg = str(e)
+        if "File" in error_msg and "not in an ACTIVE state" in error_msg:
+            return "❌ O vídeo ainda está sendo processado. Aguarde alguns instantes e tente novamente, ou use um vídeo menor."
+        elif "size" in error_msg.lower():
+            return "❌ O vídeo é muito grande. Tente com um vídeo menor ou divida-o em partes."
+        else:
+            return f"❌ Erro na análise do vídeo: {error_msg}"
 
 def analyze_transcript_with_gemini(transcript, meeting_info=None):
     """Analisa transcrição de reunião usando Gemini"""
@@ -347,7 +415,10 @@ def analyze_transcript_with_gemini(transcript, meeting_info=None):
     try:
         response = gemini_model.generate_content(
             prompt,
-            generation_config={"temperature": 0.1}
+            generation_config={
+                "temperature": 0.1,
+                "max_output_tokens": 8192,
+            }
         )
         return response.text
     except Exception as e:
@@ -413,7 +484,7 @@ def main_app():
         
         # Informações do sistema
         st.markdown("**ℹ️ Informações do Sistema**")
-        st.write(f"**Modelo:** Gemini 1.5 Flash")
+        st.write(f"**Modelo:** Gemini 2.5 Flash")
         st.write(f"**Data:** {datetime.now().strftime('%d/%m/%Y')}")
         
         st.markdown("---")
@@ -426,28 +497,30 @@ def main_app():
     # Página: Nova Análise
     if page == "📁 Nova Análise":
         st.title("🎯 Análise de Reuniões com Gemini")
-        st.markdown("Faça upload de vídeo, áudio ou transcrição para análise detalhada")
+        st.markdown("Faça upload de vídeo ou transcrição para análise detalhada")
         st.markdown("---")
         
         # Abas para diferentes tipos de entrada
-        tab1, tab2, tab3 = st.tabs(["🎥 Análise de Vídeo", "📄 Transcrição", "🔊 Áudio (em breve)"])
+        tab1, tab2 = st.tabs(["🎥 Análise de Vídeo", "📄 Transcrição"])
         
         # Tab 1: Análise de Vídeo
         with tab1:
             st.subheader("🎥 Análise de Vídeo de Reunião")
+            
             st.info("""
             **Funcionalidades disponíveis:**
             - Análise completa de vídeos de reuniões
             - Transcrição automática do áudio
             - Análise de tom de voz e entonação
             - Observações sobre dinâmica do grupo
-            - Suporta vídeos até 1 hora (Gemini 1.5 Flash)
+            - Suporta vídeos até 2GB (Gemini 1.5 Flash)
+            - Formatos suportados: MP4, MOV, AVI, WMV, FLV, WebM
             """)
             
             # Upload de vídeo
             video_file = st.file_uploader(
                 "Selecione o vídeo da reunião:",
-                type=['mp4', 'mov', 'avi', 'mkv', 'webm'],
+                type=['mp4', 'mov', 'avi', 'mkv', 'webm', 'wmv', 'flv'],
                 key="video_uploader"
             )
             
@@ -457,7 +530,16 @@ def main_app():
                 st.success(f"✅ Vídeo carregado: {video_file.name} ({file_size_mb:.1f} MB)")
                 
                 # Pré-visualização do vídeo
-                st.video(video_file)
+                col_vid1, col_vid2 = st.columns([2, 1])
+                with col_vid1:
+                    st.video(video_file)
+                with col_vid2:
+                    st.info(f"""
+                    **📊 Informações:**
+                    - Nome: {video_file.name}
+                    - Tamanho: {file_size_mb:.1f} MB
+                    - Tipo: {video_file.type}
+                    """)
                 
                 # Formulário de informações
                 with st.expander("✏️ Informações da Reunião", expanded=True):
@@ -479,21 +561,30 @@ def main_app():
                         meeting_type = st.selectbox(
                             "Tipo de reunião:",
                             ["Brainstorming", "Reunião de Equipe", "Apresentação", 
-                             "Revisão de Projeto", "One-on-One", "Outro"],
+                             "Revisão de Projeto", "One-on-One", "Decisão", "Status", "Outro"],
                             key="video_type"
                         )
                         participants = st.text_area(
                             "Participantes (opcional, um por linha):",
                             height=80,
                             placeholder="João Silva\nMaria Santos\nPedro Oliveira",
+                            help="Liste os participantes para melhor análise",
                             key="video_participants"
                         )
+                        
+                        meeting_objective = st.text_area(
+                            "Objetivo da reunião (opcional):",
+                            height=60,
+                            placeholder="Ex: Decidir sobre o lançamento do novo produto...",
+                            key="video_objective"
+                        )
+                
+                # Avisos sobre tamanho
+                if file_size_mb > 100:
+                    st.warning("⚠️ Vídeos grandes podem demorar mais para processar. Recomendamos vídeos menores que 100MB para análise mais rápida.")
                 
                 # Botão de análise
                 if st.button("🔍 Analisar Vídeo", type="primary", use_container_width=True):
-                    if file_size_mb > 100:  # Limite aproximado do Gemini
-                        st.warning("⚠️ O vídeo é muito grande. Recomendamos vídeos menores que 100MB.")
-                    
                     # Salvar vídeo temporariamente
                     with tempfile.NamedTemporaryFile(delete=False, suffix='.mp4') as tmp_file:
                         tmp_file.write(video_file.read())
@@ -506,6 +597,7 @@ def main_app():
                         HORÁRIO: {meeting_time.strftime('%H:%M')}
                         TIPO: {meeting_type}
                         PARTICIPANTES: {participants if participants else 'Não informados'}
+                        OBJETIVO: {meeting_objective if meeting_objective else 'Não informado'}
                         """
                         
                         # Realizar análise
@@ -523,7 +615,7 @@ def main_app():
                         st.markdown("---")
                         st.subheader("📥 Exportar Resultados")
                         
-                        col_dl1, col_dl2 = st.columns(2)
+                        col_dl1, col_dl2, col_dl3 = st.columns(3)
                         
                         with col_dl1:
                             st.download_button(
@@ -535,11 +627,12 @@ def main_app():
                             )
                         
                         with col_dl2:
-                            # Resumo executivo
-                            summary_prompt = f"Crie um resumo executivo de 1 parágrafo desta análise:\n\n{analysis}"
-                            try:
-                                response = gemini_model.generate_content(summary_prompt)
-                                summary = response.text
+                            # Extrair resumo
+                            if "## 📋 RESUMO EXECUTIVO" in analysis:
+                                start_idx = analysis.find("## 📋 RESUMO EXECUTIVO")
+                                end_idx = analysis.find("##", start_idx + 1)
+                                summary = analysis[start_idx:end_idx] if end_idx != -1 else analysis[start_idx:]
+                                
                                 st.download_button(
                                     "📋 Resumo Executivo",
                                     data=summary,
@@ -547,16 +640,52 @@ def main_app():
                                     mime="text/plain",
                                     use_container_width=True
                                 )
-                            except:
-                                st.error("Erro ao criar resumo")
+                            else:
+                                st.info("Resumo não disponível")
+                        
+                        with col_dl3:
+                            # Criar ações em CSV
+                            csv_data = "Ação,Responsável,Prazo,Status\n"
+                            if "### Ações Acordadas:" in analysis:
+                                # Extrair ações da análise
+                                start_idx = analysis.find("### Ações Acordadas:")
+                                end_idx = analysis.find("##", start_idx + 1)
+                                actions_text = analysis[start_idx:end_idx] if end_idx != -1 else analysis[start_idx:]
+                                
+                                # Processar ações
+                                lines = actions_text.split('\n')
+                                for line in lines:
+                                    if '-' in line and '(' in line:
+                                        action = line.split('-')[1].split('(')[0].strip()
+                                        rest = line.split('(')[1].replace(')', '')
+                                        responsible = ""
+                                        deadline = ""
+                                        if 'Responsável:' in rest:
+                                            responsible = rest.split('Responsável:')[1].split(',')[0].strip()
+                                        if 'Prazo:' in rest:
+                                            deadline = rest.split('Prazo:')[1].strip()
+                                        csv_data += f'"{action}","{responsible}","{deadline}","Pendente"\n'
+                            
+                            st.download_button(
+                                "📊 Ações em CSV",
+                                data=csv_data,
+                                file_name=f"acoes_video_{meeting_date.strftime('%Y%m%d')}.csv",
+                                mime="text/csv",
+                                use_container_width=True
+                            )
                         
                         # Limpar arquivo temporário
-                        os.unlink(video_path)
+                        try:
+                            os.unlink(video_path)
+                        except:
+                            pass
                         
                     except Exception as e:
                         st.error(f"❌ Erro durante a análise: {str(e)}")
-                        if os.path.exists(video_path):
+                        try:
                             os.unlink(video_path)
+                        except:
+                            pass
         
         # Tab 2: Transcrição
         with tab2:
@@ -574,9 +703,11 @@ def main_app():
             with col2:
                 st.info("""
                 **Formatos suportados:**
-                - PDF
+                - PDF (documentos, atas)
                 - DOCX (Word)
                 - TXT (texto puro)
+                
+                **Dica:** Para melhor análise, inclua nomes dos participantes no texto.
                 """)
             
             if uploaded_file:
@@ -610,11 +741,11 @@ def main_app():
                                 meeting_type = st.selectbox(
                                     "Tipo:",
                                     ["Brainstorming", "Reunião de Equipe", "Apresentação", 
-                                     "Revisão de Projeto", "One-on-One", "Outro"],
+                                     "Revisão de Projeto", "One-on-One", "Decisão", "Status", "Outro"],
                                     key="transcript_type"
                                 )
                                 participants = st.text_area(
-                                    "Participantes:",
+                                    "Participantes (um por linha):",
                                     height=80,
                                     key="transcript_participants"
                                 )
@@ -646,21 +777,6 @@ def main_app():
                                 )
                     else:
                         st.error(f"❌ Erro: {text}")
-        
-        # Tab 3: Áudio (placeholder)
-        with tab3:
-            st.subheader("🔊 Análise de Áudio")
-            st.info("""
-            **Em breve!**
-            
-            Estamos trabalhando na integração com:
-            - Análise de áudio puro
-            - Transcrição automática
-            - Análise de tom de voz
-            - Detecção de emoções
-            
-            **Por enquanto, use a opção de vídeo ou transcrição.**
-            """)
     
     # Página: Configurações
     elif page == "⚙️ Configurações":
@@ -727,8 +843,8 @@ def main_app():
         - Recomendações para melhorias
         
         #### 🔧 Recursos Técnicos
-        - Gemini 1.5 Flash (até 1 milhão de tokens)
-        - Análise multimodal (vídeo + áudio)
+        - Gemini 1.5 Flash (multimodal)
+        - Análise de vídeo + áudio
         - Processamento em português
         - Exportação de resultados
         
@@ -740,9 +856,8 @@ def main_app():
         
         ### ⚠️ Limitações Conhecidas
         
-        - Vídeos muito grandes podem demorar
+        - Vídeos muito grandes podem demorar para processar
         - Qualidade do áudio afeta a transcrição
-        - Análise visual limitada pela qualidade do vídeo
         - Requer conexão com internet para API
         
         ### 🆘 Suporte
@@ -819,6 +934,13 @@ st.markdown("""
     .stButton > button:hover {
         transform: translateY(-2px);
         box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
+    }
+    
+    .upload-info {
+        background: #e3f2fd;
+        padding: 1rem;
+        border-radius: 8px;
+        border-left: 4px solid #2196f3;
     }
 </style>
 """, unsafe_allow_html=True)
