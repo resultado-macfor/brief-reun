@@ -43,7 +43,7 @@ if "authenticated" not in st.session_state:
 if not st.session_state.authenticated:
     st.set_page_config(layout="centered")
     
-    st.title("🔒 Agente Performance")
+    st.title("🔒 Agente Reuniões")
     
     senha_input = st.text_input("Digite a senha de acesso:", type="password")
     
