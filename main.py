@@ -1,17 +1,12 @@
 import os
 import streamlit as st
-import pandas as pd
+import tempfile
 from datetime import datetime
-import hashlib
-import json
-from typing import List, Dict, Tuple
+import google.generativeai as genai
+from google.generativeai.types import HarmCategory, HarmBlockThreshold
 import PyPDF2
 import docx
-import io
-import google.generativeai as genai
-from anthropic import Anthropic
-from openai import OpenAI
-import requests
+import json
 import re
 
 # ============================================================================
@@ -25,13 +20,13 @@ st.set_page_config(
 )
 
 # ============================================================================
-# CONFIGURAÇÃO DAS APIS
+# CONFIGURAÇÃO DA API GEMINI
 # ============================================================================
-# Configurar APIs (coloque suas chaves nas variáveis de ambiente)
 gemini_api_key = os.getenv("GEM_API_KEY")
-anthropic_api_key = os.getenv("ANTHROPIC_API_KEY")
-openai_api_key = os.getenv("OPENAI_API_KEY")
-perplexity_api_key = os.getenv("PERP_API_KEY")
+
+if not gemini_api_key:
+    st.error("❌ API key do Gemini não encontrada. Configure a variável de ambiente GEM_API_KEY.")
+    st.stop()
 
 # ============================================================================
 # AUTENTICAÇÃO SIMPLES
@@ -86,7 +81,7 @@ if not st.session_state.authenticated:
                     senha_correta = os.getenv('senha_per')
                     
                     if not senha_correta:
-                        st.error("⚠️ Sistema não configurado. Verifique as variáveis de ambiente.")
+                        st.error("⚠️ Sistema não configurado. Verifique a variável de ambiente 'senha_per'.")
                         st.stop()
                     elif senha_input == senha_correta:
                         st.session_state.authenticated = True
@@ -108,25 +103,14 @@ if not st.session_state.authenticated:
     st.stop()
 
 # ============================================================================
-# CONFIGURAÇÃO DOS CLIENTES DE IA (só executa se autenticado)
+# CONFIGURAÇÃO DO GEMINI (só executa se autenticado)
 # ============================================================================
-clients = {}
-
-if gemini_api_key:
+try:
     genai.configure(api_key=gemini_api_key)
-    clients["gemini"] = genai.GenerativeModel("gemini-2.5-flash")
-else:
-    st.warning("API do Gemini não configurada")
-
-if anthropic_api_key:
-    clients["claude"] = Anthropic(api_key=anthropic_api_key)
-else:
-    st.warning("API do Claude não configurada")
-
-if openai_api_key:
-    clients["openai"] = OpenAI(api_key=openai_api_key)
-else:
-    st.warning("API do OpenAI não configurada")
+    gemini_model = genai.GenerativeModel('gemini-2.5-pro')
+except Exception as e:
+    st.error(f"❌ Erro ao configurar Gemini: {str(e)}")
+    st.stop()
 
 # ============================================================================
 # FUNÇÕES DE PROCESSAMENTO DE ARQUIVOS
@@ -164,17 +148,6 @@ def extract_text_from_txt(file):
         except Exception as e:
             return f"Erro ao extrair texto do TXT: {str(e)}"
 
-def extract_text_from_md(file):
-    """Extrai texto de Markdown"""
-    try:
-        return file.read().decode("utf-8")
-    except:
-        try:
-            file.seek(0)
-            return file.read().decode("latin-1")
-        except Exception as e:
-            return f"Erro ao extrair texto do Markdown: {str(e)}"
-
 def extract_text_from_file(file):
     """Extrai texto de qualquer arquivo suportado"""
     filename = file.name.lower()
@@ -185,110 +158,109 @@ def extract_text_from_file(file):
         return extract_text_from_docx(file)
     elif filename.endswith('.txt'):
         return extract_text_from_txt(file)
-    elif filename.endswith('.md'):
-        return extract_text_from_md(file)
     else:
         return "Formato de arquivo não suportado"
 
 # ============================================================================
-# FUNÇÕES DE ANÁLISE COM LLM
+# FUNÇÕES DE ANÁLISE DE VÍDEO COM GEMINI
 # ============================================================================
-def call_llm(prompt, model="gemini", system_prompt=None, temperature=0.1):
-    """Chama diferentes modelos de LLM"""
-    try:
-        if model == "gemini" and "gemini" in clients:
-            if system_prompt:
-                prompt = f"{system_prompt}\n\n{prompt}"
-            response = clients["gemini"].generate_content(prompt)
-            return response.text
-        
-        elif model == "claude" and "claude" in clients:
-            messages = [{"role": "user", "content": prompt}]
-            if system_prompt:
-                response = clients["claude"].messages.create(
-                    model="claude-3-haiku-20240307",
-                    max_tokens=4000,
-                    temperature=temperature,
-                    system=system_prompt,
-                    messages=messages
-                )
-            else:
-                response = clients["claude"].messages.create(
-                    model="claude-3-haiku-20240307",
-                    max_tokens=4000,
-                    temperature=temperature,
-                    messages=messages
-                )
-            return response.content[0].text
-        
-        elif model == "openai" and "openai" in clients:
-            messages = []
-            if system_prompt:
-                messages.append({"role": "system", "content": system_prompt})
-            messages.append({"role": "user", "content": prompt})
-            
-            response = clients["openai"].chat.completions.create(
-                model="gpt-4o-mini",
-                messages=messages,
-                temperature=temperature,
-                max_tokens=4000
-            )
-            return response.choices[0].message.content
-        
-        else:
-            return "❌ Nenhum modelo de LLM configurado. Configure pelo menos uma API key."
-            
-    except Exception as e:
-        return f"❌ Erro ao chamar LLM: {str(e)}"
-
-def search_web_perplexity(query, max_results=3):
-    """Busca informações na web usando Perplexity"""
-    if not perplexity_api_key:
-        return "API do Perplexity não configurada"
+def analyze_video_with_gemini(video_path, meeting_info=None):
+    """Analisa vídeo de reunião usando Gemini 1.5 Flash"""
     
     try:
-        headers = {
-            "Authorization": f"Bearer {perplexity_api_key}",
-            "Content-Type": "application/json"
+        # Configurar safety settings para permitir análise de áudio/vídeo
+        safety_settings = {
+            HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
+            HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
+            HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
+            HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
         }
         
-        data = {
-            "model": "sonar-medium-online",
-            "messages": [
-                {
-                    "role": "user",
-                    "content": f"""Pesquise informações sobre: {query}
-                    
-                    Forneça informações relevantes, atualizadas e confiáveis.
-                    Inclua fontes quando possível.
-                    Limite a {max_results} resultados principais."""
-                }
-            ],
-            "max_tokens": 2000,
-            "temperature": 0.1
-        }
+        # Prompt para análise de vídeo
+        system_prompt = """Você é um especialista em análise de reuniões corporativas. 
+        Analise este vídeo de reunião considerando:
+        1. Conteúdo verbal (o que é dito)
+        2. Tom de voz e entonação
+        3. Dinâmica entre participantes
+        4. Linguagem corporal quando visível
+        5. Engajamento dos participantes
         
-        response = requests.post(
-            "https://api.perplexity.ai/chat/completions",
-            headers=headers,
-            json=data,
-            timeout=30
-        )
+        Forneça uma análise completa e estruturada."""
         
-        if response.status_code == 200:
-            result = response.json()
-            return result['choices'][0]['message']['content']
-        else:
-            return f"Erro na busca: {response.status_code}"
-            
+        # Carregar o vídeo
+        video_file = genai.upload_file(video_path)
+        
+        # Preparar prompt
+        prompt_parts = [
+            system_prompt,
+            "\nANALISE ESTE VÍDEO DE REUNIÃO:",
+            video_file,
+        ]
+        
+        if meeting_info:
+            prompt_parts.append(f"\nINFORMAÇÕES ADICIONAIS:\n{meeting_info}")
+        
+        prompt_parts.append("""
+        FORNECE UMA ANÁLISE DETALHADA NO SEGUINTE FORMATO:
+        
+        # 🎥 ANÁLISE DE VÍDEO DE REUNIÃO
+        
+        ## 📋 RESUMO EXECUTIVO
+        [Resumo de 3-4 parágrafos da reunião]
+        
+        ## 🗣️ TRANSCRIÇÃO PRINCIPAL
+        [Transcrição dos pontos mais importantes discutidos]
+        
+        ## 👥 ANÁLISE DE PARTICIPANTES
+        ### [Participante 1 - quando identificável]
+        - **Participação:** [nível de participação]
+        - **Tom de voz:** [análise do tom]
+        - **Engajamento:** [análise do engajamento]
+        - **Contribuições:** [principais contribuições]
+        
+        ## 🎭 DINÂMICA DA REUNIÃO
+        - **Clima geral:** [positivo, tenso, neutro, etc.]
+        - **Interações:** [como os participantes interagiram]
+        - **Liderança:** [quem liderou a reunião]
+        - **Conflitos:** [se houver conflitos observados]
+        
+        ## 🔊 ANÁLISE DE ÁUDIO
+        - **Clareza da comunicação:** [nível de entendimento]
+        - **Tom predominante:** [formal, informal, amigável, etc.]
+        - **Momentos-chave:** [momentos importantes pela entonação]
+        
+        ## 👀 OBSERVAÇÕES VISUAIS (quando aplicável)
+        - **Linguagem corporal:** [observações relevantes]
+        - **Expressões faciais:** [expressões notáveis]
+        - **Engajamento visual:** [nível de atenção]
+        
+        ## 🚨 PONTOS DE ATENÇÃO
+        - [Lista de pontos que merecem atenção]
+        
+        ## 💡 RECOMENDAÇÕES
+        - [Sugestões para melhorias]
+        
+        ## ⭐ AVALIAÇÃO FINAL
+        **Eficácia da reunião:** X/10
+        **Engajamento:** X/10
+        **Produtividade:** X/10
+        """)
+        
+        # Gerar análise
+        with st.spinner("🔍 Gemini está analisando o vídeo... Isso pode levar alguns minutos"):
+            response = gemini_model.generate_content(
+                prompt_parts,
+                safety_settings=safety_settings,
+                generation_config={"temperature": 0.1}
+            )
+        
+        return response.text
+        
     except Exception as e:
-        return f"Erro na busca web: {str(e)}"
+        return f"❌ Erro na análise do vídeo: {str(e)}"
 
-# ============================================================================
-# FUNÇÕES ESPECÍFICAS PARA ANÁLISE DE REUNIÕES
-# ============================================================================
-def analyze_meeting_transcript(transcript, meeting_info=None):
-    """Analisa transcrição de reunião"""
+def analyze_transcript_with_gemini(transcript, meeting_info=None):
+    """Analisa transcrição de reunião usando Gemini"""
     
     system_prompt = """Você é um especialista em análise de reuniões corporativas com background em psicologia organizacional, gestão de projetos e comunicação eficaz. 
     Sua análise deve ser profunda, prática e baseada em evidências científicas."""
@@ -296,7 +268,7 @@ def analyze_meeting_transcript(transcript, meeting_info=None):
     prompt = f"""
     ANALISE ESTA TRANSCRIÇÃO DE REUNIÃO:
     
-    {transcript[:15000]}  # Limita o tamanho para evitar token overflow
+    {transcript[:15000]}
     
     INSTRUÇÕES PARA ANÁLISE:
     
@@ -312,42 +284,29 @@ def analyze_meeting_transcript(transcript, meeting_info=None):
     - Pontos de conflito ou desacordo
     - Momentos-chave da reunião
     
-    3. ANÁLISE PSICOLÓGICA E COMPORTAMENTAL POR PARTICIPANTE:
-    Para cada participante identificado, analise:
-    - Nível de participação (ativo/passivo)
+    3. ANÁLISE COMPORTAMENTAL:
+    - Nível de participação de cada um
     - Tom de voz e linguagem utilizada
-    - Grau de colaboração vs. competição
+    - Grau de colaboração
     - Clareza na comunicação
-    - Demonstração de liderança ou followership
-    - Sinais de estresse, frustração ou satisfação
-    - Influência sobre decisões
+    - Demonstração de liderança
     
     4. RED FLAGS E PONTOS DE ATENÇÃO:
     - Comunicação ineficaz
     - Falta de clareza em responsabilidades
     - Conflitos não resolvidos
     - Desalinhamento de expectativas
-    - Falta de preparação
-    - Dominação por parte de alguns participantes
     
     5. EFICÁCIA DA REUNIÃO:
     - Objetivos atingidos?
     - Tempo bem utilizado?
     - Participação equilibrada?
     - Decisões claras e acionáveis?
-    - Próximos passos definidos?
     
-    6. INSIGHTS E RECOMENDAÇÕES:
+    6. RECOMENDAÇÕES:
     - Pontos fortes a serem mantidos
-    - Melhorias sugeridas para próximas reuniões
-    - Treinamentos ou desenvolvimentos recomendados
-    - Ajustes no formato da reunião
-    
-    7. NOTA FINAL (0-10):
-    - Eficiência (0-10)
-    - Satisfação dos participantes (estimada 0-10)
-    - Qualidade das decisões (0-10)
-    - Média final (0-10)
+    - Melhorias sugeridas
+    - Treinamentos recomendados
     
     FORMATO DA RESPOSTA:
     
@@ -362,39 +321,40 @@ def analyze_meeting_transcript(transcript, meeting_info=None):
     ## 3. 🎯 DECISÕES E AÇÕES
     [Tabela com ações, responsáveis e prazos]
     
-    ## 4. 👥 ANÁLISE INDIVIDUAL POR PARTICIPANTE
+    ## 4. 👥 ANÁLISE INDIVIDUAL
     ### Participante 1: [Nome]
     - Participação: [X%]
     - Comportamento: [análise]
     - Comunicação: [análise]
     - Contribuição: [análise]
-    - Recomendações: [sugestões]
     
-    [Repetir para cada participante]
+    ## 5. 🚨 PONTOS DE ATENÇÃO
+    [Lista com explicação]
     
-    ## 5. 🚨 RED FLAGS IDENTIFICADAS
-    [Lista com explicação e gravidade]
-    
-    ## 6. 💡 INSIGHTS E RECOMENDAÇÕES
+    ## 6. 💡 RECOMENDAÇÕES
     [Lista detalhada]
     
-    ## 7. ⭐ NOTA FINAL DA REUNIÃO
+    ## 7. ⭐ NOTA FINAL
     **Eficiência:** X/10
     **Satisfação:** X/10  
     **Qualidade:** X/10
-    **Média Final:** X/10
-    
-    ## 8. 📌 PRÓXIMOS PASSOS
-    [Resumo das ações acordadas]
+    **Média:** X/10
     """
     
     if meeting_info:
-        prompt = f"INFORMAÇÕES ADICIONAIS DA REUNIÃO:\n{meeting_info}\n\n{prompt}"
+        prompt = f"INFORMAÇÕES ADICIONAIS:\n{meeting_info}\n\n{prompt}"
     
-    return call_llm(prompt, model="gemini", system_prompt=system_prompt, temperature=0.1)
+    try:
+        response = gemini_model.generate_content(
+            prompt,
+            generation_config={"temperature": 0.1}
+        )
+        return response.text
+    except Exception as e:
+        return f"❌ Erro na análise: {str(e)}"
 
 def extract_meeting_metadata(text):
-    """Extrai metadados básicos da reunião do texto"""
+    """Extrai metadados básicos da reunião"""
     
     prompt = f"""
     Extraia informações básicas desta reunião:
@@ -406,79 +366,55 @@ def extract_meeting_metadata(text):
     2. Horário
     3. Participantes presentes
     4. Objetivo da reunião
-    5. Tópicos principais
     
-    Formato de resposta JSON:
-    {{
-        "date": "data encontrada ou desconhecida",
-        "time": "horário encontrado ou desconhecido",
-        "participants": ["lista de nomes"],
-        "objective": "objetivo da reunião",
-        "topics": ["lista de tópicos"]
-    }}
+    Responda em formato JSON:
     """
     
-    response = call_llm(prompt, model="gemini", temperature=0.1)
-    
-    # Tentar extrair JSON da resposta
     try:
-        # Procura por JSON na resposta
-        json_match = re.search(r'\{.*\}', response, re.DOTALL)
+        response = gemini_model.generate_content(
+            prompt,
+            generation_config={"temperature": 0.1}
+        )
+        
+        # Tentar extrair JSON
+        text_response = response.text
+        json_match = re.search(r'\{.*\}', text_response, re.DOTALL)
         if json_match:
             return json.loads(json_match.group())
     except:
         pass
     
-    # Retorno padrão se não conseguir extrair JSON
     return {
         "date": "Não identificada",
         "time": "Não identificado",
         "participants": ["Participantes não identificados"],
-        "objective": "Não identificado",
-        "topics": ["Tópicos não identificados"]
+        "objective": "Não identificado"
     }
 
 # ============================================================================
-# INTERFACE PRINCIPAL (só aparece se autenticado)
+# INTERFACE PRINCIPAL
 # ============================================================================
 def main_app():
     """Interface principal do aplicativo"""
     
-    # Sidebar com navegação e logout
+    # Sidebar
     with st.sidebar:
-        st.title("🎯 Analisador de Reuniões IA")
+        st.title("🎯 Analisador de Reuniões")
         st.markdown("---")
         
         # Navegação
-        st.subheader("📌 Navegação")
         page = st.radio(
-            "Selecione a página:",
-            ["📁 Nova Análise", "⚙️ Configurações"],
+            "📌 Navegação",
+            ["📁 Nova Análise", "⚙️ Configurações", "ℹ️ Sobre"],
             label_visibility="collapsed"
         )
         
         st.markdown("---")
         
-        # Status do sistema
-        st.subheader("ℹ️ Status do Sistema")
-        
-        # Verificar APIs configuradas
-        apis_configuradas = []
-        if gemini_api_key:
-            apis_configuradas.append("✅ Gemini")
-        if anthropic_api_key:
-            apis_configuradas.append("✅ Claude")
-        if openai_api_key:
-            apis_configuradas.append("✅ OpenAI")
-        if perplexity_api_key:
-            apis_configuradas.append("✅ Perplexity")
-        
-        if apis_configuradas:
-            st.write("**APIs Configuradas:**")
-            for api in apis_configuradas:
-                st.write(api)
-        else:
-            st.warning("⚠️ Nenhuma API configurada")
+        # Informações do sistema
+        st.markdown("**ℹ️ Informações do Sistema**")
+        st.write(f"**Modelo:** Gemini 1.5 Flash")
+        st.write(f"**Data:** {datetime.now().strftime('%d/%m/%Y')}")
         
         st.markdown("---")
         
@@ -489,32 +425,158 @@ def main_app():
     
     # Página: Nova Análise
     if page == "📁 Nova Análise":
-        st.title("🎯 Análise de Reuniões")
-        st.markdown("Faça upload da transcrição ou cole o texto para análise detalhada")
+        st.title("🎯 Análise de Reuniões com Gemini")
+        st.markdown("Faça upload de vídeo, áudio ou transcrição para análise detalhada")
         st.markdown("---")
         
         # Abas para diferentes tipos de entrada
-        tab1, tab2 = st.tabs(["📄 Upload de Documento", "📝 Colar Texto"])
+        tab1, tab2, tab3 = st.tabs(["🎥 Análise de Vídeo", "📄 Transcrição", "🔊 Áudio (em breve)"])
         
+        # Tab 1: Análise de Vídeo
         with tab1:
-            st.subheader("Faça upload da transcrição da reunião")
+            st.subheader("🎥 Análise de Vídeo de Reunião")
+            st.info("""
+            **Funcionalidades disponíveis:**
+            - Análise completa de vídeos de reuniões
+            - Transcrição automática do áudio
+            - Análise de tom de voz e entonação
+            - Observações sobre dinâmica do grupo
+            - Suporta vídeos até 1 hora (Gemini 1.5 Flash)
+            """)
+            
+            # Upload de vídeo
+            video_file = st.file_uploader(
+                "Selecione o vídeo da reunião:",
+                type=['mp4', 'mov', 'avi', 'mkv', 'webm'],
+                key="video_uploader"
+            )
+            
+            if video_file:
+                # Mostrar informações do vídeo
+                file_size_mb = video_file.size / (1024 * 1024)
+                st.success(f"✅ Vídeo carregado: {video_file.name} ({file_size_mb:.1f} MB)")
+                
+                # Pré-visualização do vídeo
+                st.video(video_file)
+                
+                # Formulário de informações
+                with st.expander("✏️ Informações da Reunião", expanded=True):
+                    col1, col2 = st.columns(2)
+                    
+                    with col1:
+                        meeting_date = st.date_input(
+                            "Data da reunião:",
+                            value=datetime.now(),
+                            key="video_date"
+                        )
+                        meeting_time = st.time_input(
+                            "Horário:",
+                            value=datetime.now().time(),
+                            key="video_time"
+                        )
+                    
+                    with col2:
+                        meeting_type = st.selectbox(
+                            "Tipo de reunião:",
+                            ["Brainstorming", "Reunião de Equipe", "Apresentação", 
+                             "Revisão de Projeto", "One-on-One", "Outro"],
+                            key="video_type"
+                        )
+                        participants = st.text_area(
+                            "Participantes (opcional, um por linha):",
+                            height=80,
+                            placeholder="João Silva\nMaria Santos\nPedro Oliveira",
+                            key="video_participants"
+                        )
+                
+                # Botão de análise
+                if st.button("🔍 Analisar Vídeo", type="primary", use_container_width=True):
+                    if file_size_mb > 100:  # Limite aproximado do Gemini
+                        st.warning("⚠️ O vídeo é muito grande. Recomendamos vídeos menores que 100MB.")
+                    
+                    # Salvar vídeo temporariamente
+                    with tempfile.NamedTemporaryFile(delete=False, suffix='.mp4') as tmp_file:
+                        tmp_file.write(video_file.read())
+                        video_path = tmp_file.name
+                    
+                    try:
+                        # Preparar informações
+                        meeting_info = f"""
+                        DATA: {meeting_date.strftime('%d/%m/%Y')}
+                        HORÁRIO: {meeting_time.strftime('%H:%M')}
+                        TIPO: {meeting_type}
+                        PARTICIPANTES: {participants if participants else 'Não informados'}
+                        """
+                        
+                        # Realizar análise
+                        analysis = analyze_video_with_gemini(video_path, meeting_info)
+                        
+                        # Mostrar resultados
+                        st.markdown("---")
+                        st.subheader("📊 Resultado da Análise")
+                        
+                        # Container para resultados
+                        with st.container():
+                            st.markdown(analysis)
+                        
+                        # Opções de download
+                        st.markdown("---")
+                        st.subheader("📥 Exportar Resultados")
+                        
+                        col_dl1, col_dl2 = st.columns(2)
+                        
+                        with col_dl1:
+                            st.download_button(
+                                "💾 Baixar como TXT",
+                                data=analysis,
+                                file_name=f"analise_video_{meeting_date.strftime('%Y%m%d')}.txt",
+                                mime="text/plain",
+                                use_container_width=True
+                            )
+                        
+                        with col_dl2:
+                            # Resumo executivo
+                            summary_prompt = f"Crie um resumo executivo de 1 parágrafo desta análise:\n\n{analysis}"
+                            try:
+                                response = gemini_model.generate_content(summary_prompt)
+                                summary = response.text
+                                st.download_button(
+                                    "📋 Resumo Executivo",
+                                    data=summary,
+                                    file_name=f"resumo_video_{meeting_date.strftime('%Y%m%d')}.txt",
+                                    mime="text/plain",
+                                    use_container_width=True
+                                )
+                            except:
+                                st.error("Erro ao criar resumo")
+                        
+                        # Limpar arquivo temporário
+                        os.unlink(video_path)
+                        
+                    except Exception as e:
+                        st.error(f"❌ Erro durante a análise: {str(e)}")
+                        if os.path.exists(video_path):
+                            os.unlink(video_path)
+        
+        # Tab 2: Transcrição
+        with tab2:
+            st.subheader("📄 Análise de Transcrição")
             
             col1, col2 = st.columns([2, 1])
             
             with col1:
                 uploaded_file = st.file_uploader(
-                    "Selecione o arquivo:",
-                    type=['pdf', 'docx', 'txt', 'md'],
-                    help="Formatos suportados: PDF, DOCX, TXT, MD"
+                    "Selecione a transcrição:",
+                    type=['pdf', 'docx', 'txt'],
+                    key="transcript_uploader"
                 )
             
             with col2:
                 st.info("""
                 **Formatos suportados:**
-                - PDF (atas, relatórios)
-                - DOCX (documentos Word)
-                - TXT (transcrições puras)
-                - MD (Markdown)
+                - PDF
+                - DOCX (Word)
+                - TXT (texto puro)
                 """)
             
             if uploaded_file:
@@ -524,208 +586,172 @@ def main_app():
                     if text and not text.startswith("Erro"):
                         st.success("✅ Arquivo processado com sucesso!")
                         
-                        # Extrair metadados
-                        metadata = extract_meeting_metadata(text)
+                        # Mostrar prévia
+                        with st.expander("👁️ Prévia do texto", expanded=False):
+                            st.text_area("", text[:1000], height=200, disabled=True)
                         
-                        # Formulário para informações adicionais
-                        with st.expander("✏️ Adicionar informações da reunião", expanded=True):
+                        # Formulário
+                        with st.expander("✏️ Informações da Reunião", expanded=True):
                             col_info1, col_info2 = st.columns(2)
                             
                             with col_info1:
                                 meeting_date = st.date_input(
-                                    "Data da reunião:",
+                                    "Data:",
                                     value=datetime.now(),
-                                    key="meeting_date"
+                                    key="transcript_date"
                                 )
                                 meeting_time = st.time_input(
                                     "Horário:",
                                     value=datetime.now().time(),
-                                    key="meeting_time"
-                                )
-                                meeting_type = st.selectbox(
-                                    "Tipo de reunião:",
-                                    ["Brainstorming", "Decisão", "Status", "Planejamento", "Retrospectiva", "Outro"]
+                                    key="transcript_time"
                                 )
                             
                             with col_info2:
-                                participants_input = st.text_area(
-                                    "Participantes (um por linha):",
-                                    value="\n".join(metadata.get("participants", [])),
-                                    height=100
+                                meeting_type = st.selectbox(
+                                    "Tipo:",
+                                    ["Brainstorming", "Reunião de Equipe", "Apresentação", 
+                                     "Revisão de Projeto", "One-on-One", "Outro"],
+                                    key="transcript_type"
                                 )
-                                meeting_objective = st.text_area(
-                                    "Objetivo da reunião:",
-                                    value=metadata.get("objective", ""),
-                                    height=80
+                                participants = st.text_area(
+                                    "Participantes:",
+                                    height=80,
+                                    key="transcript_participants"
                                 )
                         
-                        # Botão para análise
-                        if st.button("🔍 Analisar Reunião", type="primary", use_container_width=True):
-                            with st.spinner("Analisando reunião... Isso pode levar alguns minutos"):
-                                # Preparar informações adicionais
+                        # Botão de análise
+                        if st.button("🔍 Analisar Transcrição", type="primary", use_container_width=True):
+                            with st.spinner("Analisando... Isso pode levar alguns minutos"):
                                 meeting_info = f"""
                                 DATA: {meeting_date.strftime('%d/%m/%Y')}
                                 HORÁRIO: {meeting_time.strftime('%H:%M')}
                                 TIPO: {meeting_type}
-                                PARTICIPANTES: {participants_input}
-                                OBJETIVO: {meeting_objective}
+                                PARTICIPANTES: {participants if participants else 'Não informados'}
                                 """
                                 
-                                # Realizar análise
-                                analysis = analyze_meeting_transcript(text, meeting_info)
+                                analysis = analyze_transcript_with_gemini(text, meeting_info)
                                 
                                 # Mostrar resultados
                                 st.markdown("---")
                                 st.subheader("📊 Resultado da Análise")
                                 st.markdown(analysis)
                                 
-                                # Opções de download
-                                st.markdown("---")
-                                st.subheader("📥 Exportar Resultados")
-                                
-                                col_dl1, col_dl2, col_dl3 = st.columns(3)
-                                
-                                with col_dl1:
-                                    st.download_button(
-                                        "💾 Baixar como TXT",
-                                        data=analysis,
-                                        file_name=f"analise_reuniao_{meeting_date.strftime('%Y%m%d')}.txt",
-                                        mime="text/plain"
-                                    )
-                                
-                                with col_dl2:
-                                    # Criar resumo executivo
-                                    summary_prompt = f"Crie um resumo executivo de 1 parágrafo desta análise:\n\n{analysis}"
-                                    summary = call_llm(summary_prompt, model="gemini")
-                                    st.download_button(
-                                        "📋 Resumo Executivo",
-                                        data=summary,
-                                        file_name=f"resumo_reuniao_{meeting_date.strftime('%Y%m%d')}.txt",
-                                        mime="text/plain"
-                                    )
-                                
-                                with col_dl3:
-                                    # Criar ações em CSV
-                                    csv_data = "Ação,Responsável,Prazo,Status\n"
-                                    # Extrair ações da análise
-                                    actions_prompt = f"Extraia as ações desta análise no formato CSV:\n\n{analysis}"
-                                    actions = call_llm(actions_prompt, model="gemini")
-                                    if "Ação" in actions:
-                                        csv_data = actions
-                                    st.download_button(
-                                        "📊 Ações em CSV",
-                                        data=csv_data,
-                                        file_name=f"acoes_reuniao_{meeting_date.strftime('%Y%m%d')}.csv",
-                                        mime="text/csv"
-                                    )
+                                # Download
+                                st.download_button(
+                                    "💾 Baixar Análise",
+                                    data=analysis,
+                                    file_name=f"analise_{meeting_date.strftime('%Y%m%d')}.txt",
+                                    mime="text/plain",
+                                    use_container_width=True
+                                )
                     else:
-                        st.error(f"❌ Erro ao processar arquivo: {text}")
+                        st.error(f"❌ Erro: {text}")
         
-        with tab2:
-            st.subheader("Cole a transcrição da reunião")
+        # Tab 3: Áudio (placeholder)
+        with tab3:
+            st.subheader("🔊 Análise de Áudio")
+            st.info("""
+            **Em breve!**
             
-            manual_text = st.text_area(
-                "Cole o texto da reunião aqui:",
-                height=400,
-                placeholder="Exemplo:\nJoão: Boa tarde a todos, vamos começar a reunião...\nMaria: O objetivo hoje é discutir...\nPedro: Concordo com a Maria, precisamos...",
-                help="Formato livre. Inclua nomes dos participantes quando possível."
-            )
+            Estamos trabalhando na integração com:
+            - Análise de áudio puro
+            - Transcrição automática
+            - Análise de tom de voz
+            - Detecção de emoções
             
-            if manual_text:
-                col_info1, col_info2 = st.columns(2)
-                
-                with col_info1:
-                    meeting_date = st.date_input(
-                        "Data da reunião:",
-                        value=datetime.now(),
-                        key="manual_date"
-                    )
-                    meeting_time = st.time_input(
-                        "Horário:",
-                        value=datetime.now().time(),
-                        key="manual_time"
-                    )
-                
-                with col_info2:
-                    meeting_type = st.selectbox(
-                        "Tipo de reunião:",
-                        ["Brainstorming", "Decisão", "Status", "Planejamento", "Retrospectiva", "Outro"],
-                        key="manual_type"
-                    )
-                    participants = st.text_area(
-                        "Participantes (um por linha):",
-                        height=100,
-                        key="manual_participants"
-                    )
-                
-                if st.button("🔍 Analisar Texto", type="primary", use_container_width=True):
-                    with st.spinner("Analisando reunião..."):
-                        meeting_info = f"""
-                        DATA: {meeting_date.strftime('%d/%m/%Y')}
-                        HORÁRIO: {meeting_time.strftime('%H:%M')}
-                        TIPO: {meeting_type}
-                        PARTICIPANTES: {participants}
-                        """
-                        
-                        analysis = analyze_meeting_transcript(manual_text, meeting_info)
-                        
-                        st.markdown("---")
-                        st.subheader("📊 Resultado da Análise")
-                        st.markdown(analysis)
+            **Por enquanto, use a opção de vídeo ou transcrição.**
+            """)
     
     # Página: Configurações
     elif page == "⚙️ Configurações":
         st.title("⚙️ Configurações do Sistema")
         st.markdown("---")
         
-        st.subheader("Configurações de Análise")
+        # Configurações do Gemini
+        st.subheader("🔧 Configurações do Gemini")
         
-        model_choice = st.selectbox(
-            "Modelo de IA preferido:",
-            ["Gemini", "Claude", "OpenAI"],
-            index=0
-        )
+        st.write(f"**API Key:** {'✅ Configurada' if gemini_api_key else '❌ Não configurada'}")
+        st.write(f"**Modelo:** Gemini 1.5 Flash")
+        
+        # Configurações de análise
+        st.subheader("📊 Configurações de Análise")
         
         analysis_depth = st.select_slider(
-            "Profundidade da análise:",
-            options=["Básica", "Padrão", "Detalhada", "Completa"],
+            "Nível de detalhe:",
+            options=["Básico", "Padrão", "Detalhado", "Completo"],
             value="Padrão"
         )
         
-        auto_extract = st.checkbox(
-            "Extrair metadados automaticamente",
-            value=True,
-            help="Tenta extrair data, participantes e objetivos automaticamente"
+        include_tone_analysis = st.checkbox(
+            "Incluir análise de tom e emoção",
+            value=True
         )
         
-        include_web_search = st.checkbox(
-            "Incluir pesquisa web para contexto",
-            value=False,
-            help="Busca informações adicionais na web (requer API do Perplexity)"
+        generate_actions = st.checkbox(
+            "Gerar plano de ações automaticamente",
+            value=True
         )
         
         if st.button("💾 Salvar Configurações", type="primary"):
-            st.success("Configurações salvas (em sessão temporária)!")
-        
+            st.session_state.analysis_depth = analysis_depth
+            st.session_state.include_tone = include_tone_analysis
+            st.session_state.generate_actions = generate_actions
+            st.success("Configurações salvas!")
+    
+    # Página: Sobre
+    elif page == "ℹ️ Sobre":
+        st.title("ℹ️ Sobre o Sistema")
         st.markdown("---")
-        st.subheader("Sobre o Sistema")
         
         st.info("""
-        **Analisador de Reuniões IA**  
-        Versão 1.0  
+        ## 🎯 Analisador de Reuniões com Gemini 1.5
         
-        Funcionalidades:
-        - Análise detalhada de transcrições de reuniões
-        - Identificação de participantes e análise comportamental
-        - Detecção de decisões e ações
-        - Identificação de red flags
+        **Versão:** 2.0  
+        **Data:** Novembro 2024  
+        **Tecnologia:** Google Gemini 1.5 Flash
+        
+        ### 🚀 Funcionalidades
+        
+        #### 🎥 Análise de Vídeo
+        - Suporte para vídeos de reuniões
+        - Transcrição automática do áudio
+        - Análise de tom de voz e entonação
+        - Observações sobre dinâmica do grupo
+        - Suporte a múltiplos formatos (MP4, MOV, AVI, etc.)
+        
+        #### 📄 Análise de Transcrição
+        - Processamento de PDF, DOCX e TXT
+        - Identificação de participantes
+        - Análise de decisões e ações
+        - Detecção de pontos de atenção
         - Recomendações para melhorias
         
-        APIs suportadas:
-        - Google Gemini
-        - Anthropic Claude
-        - OpenAI GPT
-        - Perplexity (para pesquisa web)
+        #### 🔧 Recursos Técnicos
+        - Gemini 1.5 Flash (até 1 milhão de tokens)
+        - Análise multimodal (vídeo + áudio)
+        - Processamento em português
+        - Exportação de resultados
+        
+        ### 📋 Requisitos do Sistema
+        
+        1. **API Key do Gemini:** Configure a variável `GEM_API_KEY`
+        2. **Senha de acesso:** Configure a variável `senha_per`
+        3. **Python 3.8+:** Com bibliotecas necessárias
+        
+        ### ⚠️ Limitações Conhecidas
+        
+        - Vídeos muito grandes podem demorar
+        - Qualidade do áudio afeta a transcrição
+        - Análise visual limitada pela qualidade do vídeo
+        - Requer conexão com internet para API
+        
+        ### 🆘 Suporte
+        
+        Para problemas ou dúvidas, verifique:
+        1. Configuração das variáveis de ambiente
+        2. Qualidade do arquivo de entrada
+        3. Conexão com a internet
+        4. Limites da API do Gemini
         """)
 
 # ============================================================================
@@ -737,54 +763,37 @@ st.markdown("""
         background-color: #f8f9fa;
     }
     
-    .main-header {
+    .video-analysis-card {
         background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
         color: white;
         padding: 2rem;
         border-radius: 10px;
-        margin-bottom: 2rem;
+        margin: 1rem 0;
     }
     
-    .analysis-card {
+    .result-card {
         background: white;
         padding: 1.5rem;
         border-radius: 10px;
         box-shadow: 0 2px 10px rgba(0,0,0,0.1);
-        margin-bottom: 1rem;
+        margin: 1rem 0;
         border-left: 4px solid #667eea;
     }
     
-    .participant-card {
-        background: #f8f9fa;
+    .warning-card {
+        background: #fff3cd;
+        border-left: 4px solid #ffc107;
         padding: 1rem;
         border-radius: 8px;
-        margin: 0.5rem 0;
-        border-left: 3px solid #4CAF50;
+        margin: 1rem 0;
     }
     
-    .red-flag {
-        background: #ffebee;
+    .success-card {
+        background: #d4edda;
+        border-left: 4px solid #28a745;
         padding: 1rem;
         border-radius: 8px;
-        margin: 0.5rem 0;
-        border-left: 3px solid #f44336;
-    }
-    
-    .insight-card {
-        background: #e8f5e9;
-        padding: 1rem;
-        border-radius: 8px;
-        margin: 0.5rem 0;
-        border-left: 3px solid #4CAF50;
-    }
-    
-    .metric-card {
-        background: white;
-        padding: 1rem;
-        border-radius: 8px;
-        text-align: center;
-        box-shadow: 0 2px 5px rgba(0,0,0,0.1);
-        margin: 0.5rem;
+        margin: 1rem 0;
     }
     
     .stTabs [data-baseweb="tab-list"] {
@@ -793,12 +802,23 @@ st.markdown("""
     
     .stTabs [data-baseweb="tab"] {
         height: 50px;
-        white-space: pre-wrap;
-        background-color: #f0f2f6;
-        border-radius: 4px 4px 0px 0px;
-        gap: 1px;
-        padding-top: 10px;
-        padding-bottom: 10px;
+        padding: 10px 20px;
+        font-weight: 500;
+    }
+    
+    /* Estilo para o botão de análise */
+    .stButton > button {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        color: white;
+        font-weight: bold;
+        border: none;
+        padding: 12px 24px;
+        border-radius: 8px;
+    }
+    
+    .stButton > button:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
     }
 </style>
 """, unsafe_allow_html=True)
