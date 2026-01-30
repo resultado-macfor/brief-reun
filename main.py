@@ -491,7 +491,6 @@ def main_app():
         
         # Informações do sistema
         st.markdown("**ℹ️ Informações do Sistema**")
-        st.write(f"**Modelo:** Gemini 1.5 Flash")
         st.write(f"**Data:** {datetime.now().strftime('%d/%m/%Y')}")
         
         st.markdown("---")
