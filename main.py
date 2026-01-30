@@ -31,10 +31,10 @@ st.set_page_config(
 # CONFIGURAÇÃO DAS APIS
 # ============================================================================
 # Configurar APIs (coloque suas chaves nas variáveis de ambiente)
-gemini_api_key = os.getenv("GEMINI_API_KEY")
+gemini_api_key = os.getenv("GEM_API_KEY")
 anthropic_api_key = os.getenv("ANTHROPIC_API_KEY")
 openai_api_key = os.getenv("OPENAI_API_KEY")
-perplexity_api_key = os.getenv("PERPLEXITY_API_KEY")
+perplexity_api_key = os.getenv("PERP_API_KEY")
 mongo_uri = os.getenv('MONGO_URI')
 
 if "authenticated" not in st.session_state:
