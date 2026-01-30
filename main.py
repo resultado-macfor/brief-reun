@@ -3,14 +3,11 @@ import streamlit as st
 import pandas as pd
 from datetime import datetime
 import hashlib
-from pymongo import MongoClient
 import json
 from typing import List, Dict, Tuple
 import PyPDF2
 import docx
-import tempfile
 import io
-from PIL import Image
 import google.generativeai as genai
 from anthropic import Anthropic
 from openai import OpenAI
@@ -35,33 +32,84 @@ gemini_api_key = os.getenv("GEM_API_KEY")
 anthropic_api_key = os.getenv("ANTHROPIC_API_KEY")
 openai_api_key = os.getenv("OPENAI_API_KEY")
 perplexity_api_key = os.getenv("PERP_API_KEY")
-mongo_uri = os.getenv('MONGO_URI')
 
+# ============================================================================
+# AUTENTICAÇÃO SIMPLES
+# ============================================================================
 if "authenticated" not in st.session_state:
     st.session_state.authenticated = False
 
+# Se não estiver autenticado, mostra a tela de login
 if not st.session_state.authenticated:
+    # Layout centralizado para a tela de login
     st.set_page_config(layout="centered")
     
-    st.title("🔒 Agente Reuniões")
+    col1, col2, col3 = st.columns([1, 2, 1])
     
-    senha_input = st.text_input("Digite a senha de acesso:", type="password")
-    
-    if st.button("Acessar"):
-        senha_correta = os.getenv('senha_per')
+    with col2:
+        st.title("🔒 Analisador de Reuniões IA")
+        st.markdown("---")
         
-        if not senha_correta:
-            st.error("Sistema não configurado.")
-        elif senha_input == senha_correta:
-            st.session_state.authenticated = True
-            st.rerun()
-        else:
-            st.error("Senha incorreta.")
+        # Card de login
+        with st.container():
+            st.markdown(
+                """
+                <style>
+                .login-card {
+                    background: white;
+                    padding: 2rem;
+                    border-radius: 10px;
+                    box-shadow: 0 4px 20px rgba(0,0,0,0.1);
+                }
+                </style>
+                """,
+                unsafe_allow_html=True
+            )
+            
+            st.markdown('<div class="login-card">', unsafe_allow_html=True)
+            
+            senha_input = st.text_input(
+                "**Digite a senha de acesso:**",
+                type="password",
+                placeholder="Digite a senha aqui...",
+                key="senha_input"
+            )
+            
+            col_btn1, col_btn2, col_btn3 = st.columns([1, 2, 1])
+            with col_btn2:
+                if st.button(
+                    "🔓 Acessar Sistema",
+                    type="primary",
+                    use_container_width=True,
+                    key="btn_login"
+                ):
+                    senha_correta = os.getenv('senha_per')
+                    
+                    if not senha_correta:
+                        st.error("⚠️ Sistema não configurado. Verifique as variáveis de ambiente.")
+                        st.stop()
+                    elif senha_input == senha_correta:
+                        st.session_state.authenticated = True
+                        st.rerun()
+                    else:
+                        st.error("❌ Senha incorreta. Tente novamente.")
+            
+            st.markdown("</div>", unsafe_allow_html=True)
+            
+            # Informações adicionais
+            st.markdown("---")
+            st.caption(
+                """
+                **Sistema de Análise de Reuniões com IA**  
+                Para acessar, digite a senha fornecida pelo administrador.
+                """
+            )
     
     st.stop()
 
-
-# Configurar clientes
+# ============================================================================
+# CONFIGURAÇÃO DOS CLIENTES DE IA (só executa se autenticado)
+# ============================================================================
 clients = {}
 
 if gemini_api_key:
@@ -79,158 +127,6 @@ if openai_api_key:
     clients["openai"] = OpenAI(api_key=openai_api_key)
 else:
     st.warning("API do OpenAI não configurada")
-
-# ============================================================================
-# SISTEMA DE AUTENTICAÇÃO
-# ============================================================================
-def make_hashes(password):
-    return hashlib.sha256(str.encode(password)).hexdigest()
-
-def check_hashes(password, hashed_text):
-    return make_hashes(password) == hashed_text
-
-# Conexão MongoDB
-@st.cache_resource
-def get_mongo_client():
-    try:
-        client = MongoClient(mongo_uri)
-        return client
-    except Exception as e:
-        st.error(f"Erro ao conectar ao MongoDB: {e}")
-        return None
-
-client = get_mongo_client()
-if client:
-    db = client['meeting_analyzer']
-    users_collection = db['users']
-    meetings_collection = db['meetings']
-    reports_collection = db['reports']
-else:
-    # Fallback para dados locais (apenas desenvolvimento)
-    users_collection = None
-    meetings_collection = None
-    reports_collection = None
-
-# Funções de usuário
-def create_user(email, password, name, company, role):
-    """Cria um novo usuário"""
-    try:
-        if users_collection and users_collection.find_one({"email": email}):
-            return False, "Usuário já existe"
-        
-        user_data = {
-            "email": email,
-            "password": make_hashes(password),
-            "name": name,
-            "company": company,
-            "role": role,
-            "created_at": datetime.now(),
-            "last_login": None,
-            "active": True
-        }
-        
-        if users_collection:
-            users_collection.insert_one(user_data)
-        else:
-            # Salvar em session state para desenvolvimento
-            if "local_users" not in st.session_state:
-                st.session_state.local_users = {}
-            st.session_state.local_users[email] = user_data
-        
-        return True, "Usuário criado com sucesso"
-    except Exception as e:
-        return False, f"Erro ao criar usuário: {str(e)}"
-
-def authenticate_user(email, password):
-    """Autentica um usuário"""
-    try:
-        user = None
-        
-        # Tentar no MongoDB primeiro
-        if users_collection:
-            user = users_collection.find_one({"email": email, "active": True})
-        elif "local_users" in st.session_state:
-            user = st.session_state.local_users.get(email)
-        
-        if user:
-            if check_hashes(password, user["password"]):
-                # Atualizar último login
-                if users_collection:
-                    users_collection.update_one(
-                        {"email": email},
-                        {"$set": {"last_login": datetime.now()}}
-                    )
-                return True, user, "Login bem-sucedido"
-            else:
-                return False, None, "Senha incorreta"
-        else:
-            return False, None, "Usuário não encontrado"
-    except Exception as e:
-        return False, None, f"Erro na autenticação: {str(e)}"
-
-# Interface de login/cadastro
-def login_page():
-    """Página de login/cadastro"""
-    st.title("🔐 Analisador de Reuniões IA")
-    st.markdown("---")
-    
-    tab_login, tab_register = st.tabs(["Login", "Cadastro"])
-    
-    with tab_login:
-        with st.form("login_form"):
-            email = st.text_input("Email")
-            password = st.text_input("Senha", type="password")
-            submit = st.form_submit_button("Entrar")
-            
-            if submit:
-                if email and password:
-                    success, user, message = authenticate_user(email, password)
-                    if success:
-                        st.session_state.logged_in = True
-                        st.session_state.user = {
-                            "email": email,
-                            "name": user.get("name", "Usuário"),
-                            "company": user.get("company", ""),
-                            "role": user.get("role", "")
-                        }
-                        st.success(message)
-                        st.rerun()
-                    else:
-                        st.error(message)
-                else:
-                    st.error("Preencha todos os campos")
-    
-    with tab_register:
-        with st.form("register_form"):
-            name = st.text_input("Nome completo")
-            email = st.text_input("Email")
-            company = st.text_input("Empresa")
-            role = st.selectbox("Cargo", ["Gestor", "Analista", "Consultor", "Outro"])
-            password = st.text_input("Senha", type="password")
-            confirm_password = st.text_input("Confirmar senha", type="password")
-            submit = st.form_submit_button("Criar conta")
-            
-            if submit:
-                if not all([name, email, company, password, confirm_password]):
-                    st.error("Preencha todos os campos obrigatórios")
-                elif password != confirm_password:
-                    st.error("As senhas não coincidem")
-                elif len(password) < 6:
-                    st.error("A senha deve ter pelo menos 6 caracteres")
-                else:
-                    success, message = create_user(email, password, name, company, role)
-                    if success:
-                        st.success(message)
-                    else:
-                        st.error(message)
-
-# Verificar login
-if "logged_in" not in st.session_state:
-    st.session_state.logged_in = False
-
-if not st.session_state.logged_in:
-    login_page()
-    st.stop()
 
 # ============================================================================
 # FUNÇÕES DE PROCESSAMENTO DE ARQUIVOS
@@ -497,24 +393,6 @@ def analyze_meeting_transcript(transcript, meeting_info=None):
     
     return call_llm(prompt, model="gemini", system_prompt=system_prompt, temperature=0.1)
 
-def analyze_video_meeting(video_file):
-    """Analisa vídeo de reunião (placeholder - na prática precisaria de APIs de vídeo)"""
-    
-    # Em produção, usar APIs como Google Video Intelligence, Azure Video Indexer, etc.
-    return """
-    # 🎥 ANÁLISE DE VÍDEO DE REUNIÃO
-    
-    ⚠️ **Funcionalidade em desenvolvimento**
-    
-    Para análise completa de vídeo, precisaríamos integrar com:
-    - API de transcrição de áudio
-    - Análise de expressões faciais
-    - Detecção de tom de voz
-    - Análise de linguagem corporal
-    
-    **Sugestão:** Faça upload da transcrição da reunião em formato de texto para análise detalhada.
-    """
-
 def extract_meeting_metadata(text):
     """Extrai metadados básicos da reunião do texto"""
     
@@ -561,46 +439,62 @@ def extract_meeting_metadata(text):
     }
 
 # ============================================================================
-# INTERFACE PRINCIPAL
+# INTERFACE PRINCIPAL (só aparece se autenticado)
 # ============================================================================
 def main_app():
     """Interface principal do aplicativo"""
     
-    # Sidebar com informações do usuário
+    # Sidebar com navegação e logout
     with st.sidebar:
-        st.title(f"👋 Olá, {st.session_state.user['name']}")
-        st.write(f"**Empresa:** {st.session_state.user['company']}")
-        st.write(f"**Cargo:** {st.session_state.user['role']}")
+        st.title("🎯 Analisador de Reuniões IA")
         st.markdown("---")
         
         # Navegação
-        st.title("📌 Navegação")
+        st.subheader("📌 Navegação")
         page = st.radio(
             "Selecione a página:",
-            ["📁 Nova Análise", "📊 Histórico", "⚙️ Configurações"],
+            ["📁 Nova Análise", "⚙️ Configurações"],
             label_visibility="collapsed"
         )
         
         st.markdown("---")
         
-        # Informações do sistema
-        st.title("ℹ️ Sistema")
-        st.write(f"**Usuário:** {st.session_state.user['email']}")
-        st.write(f"**Último login:** {datetime.now().strftime('%d/%m/%Y %H:%M')}")
+        # Status do sistema
+        st.subheader("ℹ️ Status do Sistema")
         
-        # Logout
-        if st.button("🚪 Sair", use_container_width=True):
-            for key in list(st.session_state.keys()):
-                del st.session_state[key]
+        # Verificar APIs configuradas
+        apis_configuradas = []
+        if gemini_api_key:
+            apis_configuradas.append("✅ Gemini")
+        if anthropic_api_key:
+            apis_configuradas.append("✅ Claude")
+        if openai_api_key:
+            apis_configuradas.append("✅ OpenAI")
+        if perplexity_api_key:
+            apis_configuradas.append("✅ Perplexity")
+        
+        if apis_configuradas:
+            st.write("**APIs Configuradas:**")
+            for api in apis_configuradas:
+                st.write(api)
+        else:
+            st.warning("⚠️ Nenhuma API configurada")
+        
+        st.markdown("---")
+        
+        # Botão de logout
+        if st.button("🚪 Sair do Sistema", use_container_width=True):
+            st.session_state.authenticated = False
             st.rerun()
     
     # Página: Nova Análise
     if page == "📁 Nova Análise":
         st.title("🎯 Análise de Reuniões")
+        st.markdown("Faça upload da transcrição ou cole o texto para análise detalhada")
         st.markdown("---")
         
         # Abas para diferentes tipos de entrada
-        tab1, tab2, tab3 = st.tabs(["📄 Upload de Documento", "📝 Colar Texto", "🎥 Upload de Vídeo"])
+        tab1, tab2 = st.tabs(["📄 Upload de Documento", "📝 Colar Texto"])
         
         with tab1:
             st.subheader("Faça upload da transcrição da reunião")
@@ -679,21 +573,6 @@ def main_app():
                                 
                                 # Realizar análise
                                 analysis = analyze_meeting_transcript(text, meeting_info)
-                                
-                                # Salvar no histórico
-                                if meetings_collection:
-                                    meeting_record = {
-                                        "user_email": st.session_state.user["email"],
-                                        "filename": uploaded_file.name,
-                                        "meeting_date": meeting_date,
-                                        "meeting_time": meeting_time,
-                                        "meeting_type": meeting_type,
-                                        "participants": participants_input.split("\n"),
-                                        "objective": meeting_objective,
-                                        "analysis": analysis,
-                                        "created_at": datetime.now()
-                                    }
-                                    meetings_collection.insert_one(meeting_record)
                                 
                                 # Mostrar resultados
                                 st.markdown("---")
@@ -793,124 +672,61 @@ def main_app():
                         st.markdown("---")
                         st.subheader("📊 Resultado da Análise")
                         st.markdown(analysis)
-        
-        with tab3:
-            st.subheader("Faça upload do vídeo da reunião")
-            st.warning("⚠️ Funcionalidade em desenvolvimento")
-            st.info("""
-            Para análise de vídeo, estamos desenvolvendo integração com:
-            - Transcrição automática de áudio
-            - Análise de expressões faciais
-            - Detecção de tom de voz
-            - Análise de engajamento
-            
-            **Por enquanto, use as opções de texto acima.**
-            """)
-            
-            video_file = st.file_uploader(
-                "Selecione o vídeo:",
-                type=['mp4', 'mov', 'avi', 'mkv'],
-                disabled=True  # Desabilitado até implementar
-            )
-    
-    # Página: Histórico
-    elif page == "📊 Histórico":
-        st.title("📊 Histórico de Análises")
-        st.markdown("---")
-        
-        # Buscar análises anteriores
-        if meetings_collection:
-            analyses = list(meetings_collection.find(
-                {"user_email": st.session_state.user["email"]}
-            ).sort("created_at", -1).limit(20))
-        else:
-            analyses = []
-        
-        if analyses:
-            for analysis in analyses:
-                with st.expander(f"📅 {analysis.get('meeting_date', 'Data não informada')} - {analysis.get('filename', 'Sem nome')}", expanded=False):
-                    col_info, col_actions = st.columns([3, 1])
-                    
-                    with col_info:
-                        st.write(f"**Tipo:** {analysis.get('meeting_type', 'Não informado')}")
-                        st.write(f"**Participantes:** {len(analysis.get('participants', []))}")
-                        st.write(f"**Data da análise:** {analysis['created_at'].strftime('%d/%m/%Y %H:%M')}")
-                    
-                    with col_actions:
-                        if st.button("🔍 Ver Análise", key=f"view_{analysis.get('_id', '')}"):
-                            st.markdown(analysis.get('analysis', 'Análise não disponível'))
-                        
-                        if st.button("📥 Exportar", key=f"export_{analysis.get('_id', '')}"):
-                            st.download_button(
-                                "Baixar",
-                                data=analysis.get('analysis', ''),
-                                file_name=f"analise_{analysis.get('meeting_date', 'data')}.txt",
-                                mime="text/plain"
-                            )
-        else:
-            st.info("Nenhuma análise encontrada. Faça sua primeira análise na página 'Nova Análise'.")
     
     # Página: Configurações
     elif page == "⚙️ Configurações":
-        st.title("⚙️ Configurações")
+        st.title("⚙️ Configurações do Sistema")
         st.markdown("---")
         
-        tab_config, tab_account = st.tabs(["Configurações do Sistema", "Conta"])
+        st.subheader("Configurações de Análise")
         
-        with tab_config:
-            st.subheader("Configurações de Análise")
-            
-            model_choice = st.selectbox(
-                "Modelo de IA preferido:",
-                ["Gemini", "Claude", "OpenAI"],
-                index=0
-            )
-            
-            analysis_depth = st.select_slider(
-                "Profundidade da análise:",
-                options=["Básica", "Padrão", "Detalhada", "Completa"],
-                value="Padrão"
-            )
-            
-            auto_extract = st.checkbox(
-                "Extrair metadados automaticamente",
-                value=True,
-                help="Tenta extrair data, participantes e objetivos automaticamente"
-            )
-            
-            include_web_search = st.checkbox(
-                "Incluir pesquisa web para contexto",
-                value=False,
-                help="Busca informações adicionais na web (requer API do Perplexity)"
-            )
-            
-            if st.button("💾 Salvar Configurações", type="primary"):
-                st.success("Configurações salvas!")
+        model_choice = st.selectbox(
+            "Modelo de IA preferido:",
+            ["Gemini", "Claude", "OpenAI"],
+            index=0
+        )
         
-        with tab_account:
-            st.subheader("Informações da Conta")
-            
-            col_acc1, col_acc2 = st.columns(2)
-            
-            with col_acc1:
-                st.text_input("Nome completo", value=st.session_state.user["name"], disabled=True)
-                st.text_input("Email", value=st.session_state.user["email"], disabled=True)
-            
-            with col_acc2:
-                st.text_input("Empresa", value=st.session_state.user["company"])
-                st.text_input("Cargo", value=st.session_state.user["role"])
-            
-            st.subheader("Alterar Senha")
-            
-            current_pass = st.text_input("Senha atual", type="password")
-            new_pass = st.text_input("Nova senha", type="password")
-            confirm_pass = st.text_input("Confirmar nova senha", type="password")
-            
-            if st.button("🔐 Alterar Senha", type="primary"):
-                if new_pass == confirm_pass:
-                    st.success("Senha alterada com sucesso!")
-                else:
-                    st.error("As senhas não coincidem")
+        analysis_depth = st.select_slider(
+            "Profundidade da análise:",
+            options=["Básica", "Padrão", "Detalhada", "Completa"],
+            value="Padrão"
+        )
+        
+        auto_extract = st.checkbox(
+            "Extrair metadados automaticamente",
+            value=True,
+            help="Tenta extrair data, participantes e objetivos automaticamente"
+        )
+        
+        include_web_search = st.checkbox(
+            "Incluir pesquisa web para contexto",
+            value=False,
+            help="Busca informações adicionais na web (requer API do Perplexity)"
+        )
+        
+        if st.button("💾 Salvar Configurações", type="primary"):
+            st.success("Configurações salvas (em sessão temporária)!")
+        
+        st.markdown("---")
+        st.subheader("Sobre o Sistema")
+        
+        st.info("""
+        **Analisador de Reuniões IA**  
+        Versão 1.0  
+        
+        Funcionalidades:
+        - Análise detalhada de transcrições de reuniões
+        - Identificação de participantes e análise comportamental
+        - Detecção de decisões e ações
+        - Identificação de red flags
+        - Recomendações para melhorias
+        
+        APIs suportadas:
+        - Google Gemini
+        - Anthropic Claude
+        - OpenAI GPT
+        - Perplexity (para pesquisa web)
+        """)
 
 # ============================================================================
 # ESTILOS CSS
