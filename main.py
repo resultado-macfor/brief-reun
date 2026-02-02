@@ -432,8 +432,6 @@ def analise_rapida_reuniao(transcricao: str) -> str:
     response = modelo_analise.generate_content(prompt)
     return response.text
 
-# --- Interface Principal ---
-st.image('macLogo.png', width=300)
 st.title("🎯 Analisador de Reuniões de Vendas")
 st.markdown("Análise inteligente de calls com base em metodologias de vendas complexas")
 
