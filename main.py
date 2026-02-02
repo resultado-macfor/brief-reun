@@ -324,7 +324,7 @@ with tab_analise:
     
     # Opções de entrada
     metodo_entrada = st.radio("Como fornecer a reunião:", 
-                             ["Upload de Áudio/Video", "Texto Direto", "Gravação por Microfone"])
+                             ["Texto Direto"])
     
     transcricao_texto = ""
     
