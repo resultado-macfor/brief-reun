@@ -9,7 +9,6 @@ from pymongo import MongoClient
 from bson import ObjectId
 import json
 import hashlib
-from google.genai import types
 import uuid
 from typing import List, Dict
 import openai
