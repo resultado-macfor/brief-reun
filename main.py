@@ -74,7 +74,7 @@ if not gemini_api_key:
     st.stop()
 
 genai.configure(api_key=gemini_api_key)
-modelo_analise = genai.GenerativeModel("gemini-1.5-flash")
+modelo_analise = genai.GenerativeModel("gemini-2.5-flash")
 
 # --- SYSTEM PROMPT ---
 SYSTEM_PROMPT_ANALISE = """
