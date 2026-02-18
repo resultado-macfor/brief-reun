@@ -6,6 +6,7 @@ import os
 from typing import List, Dict
 import openai
 import json
+import re
 
 # Configurações das credenciais
 OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
@@ -179,23 +180,63 @@ Capacidade de fechamento.
 """
 
 SYSTEM_PROMPT_OUTPUTS_ADICIONAIS = """
-Com base na análise da transcrição da reunião de vendas fornecida, gere os seguintes outputs estruturados:
+Com base na análise da transcrição da reunião de vendas fornecida, gere os seguintes outputs estruturados. É CRÍTICO que você siga o formato JSON especificado abaixo para que possamos exibir corretamente na interface.
 
-1. **ACORDOS E COMBINADOS**: Liste todos os acordos verbais, compromissos e combinações feitas durante a reunião entre vendedor e cliente. Seja específico sobre o que foi acordado.
+Formato JSON OBRIGATÓRIO:
+{
+    "acordos_combinados": [
+        {
+            "descricao": "Descrição clara do acordo",
+            "partes_envolvidas": ["parte1", "parte2"],
+            "condicoes": "Condições específicas se houver",
+            "status": "pendente/em_andamento/concluido"
+        }
+    ],
+    "tasks": [
+        {
+            "responsavel": {
+                "nome": "Nome da pessoa",
+                "cargo": "Cargo/função",
+                "contato": "Email se mencionado ou 'não informado'"
+            },
+            "descricao": "Descrição clara da tarefa",
+            "prazo": "Data ou condição de prazo",
+            "ferramentas_necessarias": ["ferramenta1", "ferramenta2"],
+            "entrega_final": "Descrição do que deve ser entregue",
+            "reportar_para": {
+                "nome": "Nome de quem deve receber o reporte",
+                "cargo": "Cargo dessa pessoa"
+            },
+            "prioridade": "alta/media/baixa",
+            "dependencias": ["dependência1"] ou []
+        }
+    ],
+    "entregaveis": [
+        {
+            "nome": "Nome do entregável",
+            "descricao": "Descrição detalhada",
+            "responsavel_entrega": "Quem deve entregar",
+            "formato_esperado": "PDF, documento, proposta, etc",
+            "prazo": "Prazo de entrega",
+            "destinatario": "Quem deve receber"
+        }
+    ],
+    "proximos_passos": {
+        "acoes_imediatas": ["ação1", "ação2"],
+        "preparativos_proxima_reuniao": ["preparativo1", "preparativo2"],
+        "agenda_sugerida": ["ponto1", "ponto2", "ponto3"],
+        "objetivos_proxima_reuniao": ["objetivo1", "objetivo2"],
+        "data_sugerida": "Data sugerida para próxima reunião",
+        "participantes_necessarios": ["participante1", "participante2"]
+    }
+}
 
-2. **TASKS (TAREFAS)**: Para cada tarefa identificada, forneça:
-   - Pessoa responsável (identificada pelo nome ou cargo)
-   - Descrição clara da tarefa
-   - Prazo (se mencionado ou sugerido)
-   - Ferramentas necessárias para execução
-   - Entrega final esperada
-   - A quem reportar o resultado
-
-3. **ENTREGÁVEIS**: Liste todos os materiais, documentos, propostas ou qualquer item que precise ser entregue por qualquer uma das partes, com especificações claras.
-
-4. **PRÓXIMOS PASSOS E ATIVIDADES PARA PRÓXIMA REUNIÃO**: Descreva claramente o que deve acontecer após esta reunião, incluindo preparativos necessários, agenda sugerida para o próximo encontro e objetivos da próxima interação.
-
-Formate a resposta com títulos claros para cada seção e use marcadores para facilitar a leitura.
+REGRAS IMPORTANTES:
+1. Para cada task, SEMPRE identifique o responsável com nome e cargo sempre que possível
+2. Use "não informado" quando dados não estiverem disponíveis na transcrição
+3. Seja específico nas descrições
+4. Priorize tasks identificadas explicitamente na conversa
+5. Inclua dependências entre tasks quando relevante
 """
 
 def analisar_reuniao_com_rag(transcricao: str) -> Dict[str, str]:
@@ -237,7 +278,7 @@ def analisar_reuniao_com_rag(transcricao: str) -> Dict[str, str]:
         response_analise = modelo_analise.generate_content(prompt_analise)
         analise_principal = response_analise.text
         
-        # Construir prompt para outputs adicionais baseados na análise
+        # Construir prompt para outputs adicionais em formato JSON
         prompt_outputs = f"""
         {SYSTEM_PROMPT_OUTPUTS_ADICIONAIS}
         
@@ -252,25 +293,121 @@ def analisar_reuniao_com_rag(transcricao: str) -> Dict[str, str]:
         
         ## SUA TAREFA:
         
-        Com base na análise acima e na transcrição original, gere os outputs adicionais solicitados.
-        Seja extremamente detalhista e específico. Para as tasks, sempre identifique a pessoa responsável pelo nome ou cargo mencionado na transcrição.
-        Se alguma informação não estiver disponível na transcrição, indique como "Não especificado" ou sugira com base no contexto da análise.
+        Com base na análise acima e na transcrição original, gere os outputs adicionais solicitados no formato JSON especificado.
+        
+        IMPORTANTE: 
+        - Retorne APENAS o JSON válido, sem texto adicional antes ou depois
+        - Certifique-se de que o JSON está bem formatado e pode ser parseado
+        - Para tasks, SEMPRE inclua responsável com nome e cargo
+        - Use sua inteligência para inferir cargos quando não explicitamente mencionados
         """
         
         # Gera outputs adicionais
         response_outputs = modelo_analise.generate_content(prompt_outputs)
-        outputs_adicionais = response_outputs.text
+        
+        # Tenta extrair JSON da resposta
+        outputs_text = response_outputs.text
+        json_match = re.search(r'\{.*\}', outputs_text, re.DOTALL)
+        
+        if json_match:
+            try:
+                outputs_json = json.loads(json_match.group())
+            except:
+                # Se falhar o parse, retorna o texto original
+                outputs_json = {"erro": "Falha ao parsear JSON", "texto_original": outputs_text}
+        else:
+            outputs_json = {"erro": "JSON não encontrado na resposta", "texto_original": outputs_text}
         
         return {
             "analise_principal": analise_principal,
-            "outputs_adicionais": outputs_adicionais
+            "outputs_json": outputs_json,
+            "outputs_raw": outputs_text
         }
         
     except Exception as e:
         return {
             "analise_principal": f"Erro na análise: {str(e)}",
-            "outputs_adicionais": f"Erro ao gerar outputs adicionais: {str(e)}"
+            "outputs_json": {"erro": str(e)},
+            "outputs_raw": ""
         }
+
+def display_task_card(task):
+    """Exibe um card de task formatado"""
+    responsavel = task.get('responsavel', {})
+    reportar_para = task.get('reportar_para', {})
+    
+    with st.container():
+        col1, col2 = st.columns([3, 1])
+        
+        with col1:
+            st.markdown(f"**{task.get('descricao', 'Task sem descrição')}**")
+            
+            # Responsável com ícone
+            nome_resp = responsavel.get('nome', 'Não especificado')
+            cargo_resp = responsavel.get('cargo', '')
+            if cargo_resp:
+                st.markdown(f"👤 **Responsável:** {nome_resp} • {cargo_resp}")
+            else:
+                st.markdown(f"👤 **Responsável:** {nome_resp}")
+            
+            # Ferramentas
+            ferramentas = task.get('ferramentas_necessarias', [])
+            if ferramentas:
+                st.markdown(f"🛠️ **Ferramentas:** {', '.join(ferramentas)}")
+            
+            # Entrega final
+            entrega = task.get('entrega_final', '')
+            if entrega:
+                st.markdown(f"📦 **Entrega:** {entrega}")
+            
+            # Reportar para
+            if reportar_para:
+                nome_report = reportar_para.get('nome', '')
+                cargo_report = reportar_para.get('cargo', '')
+                if cargo_report:
+                    st.markdown(f"📊 **Reportar para:** {nome_report} • {cargo_report}")
+                else:
+                    st.markdown(f"📊 **Reportar para:** {nome_report}")
+            
+            # Dependências
+            dependencias = task.get('dependencias', [])
+            if dependencias and dependencias[0]:
+                st.markdown(f"⛓️ **Depende de:** {', '.join(dependencias)}")
+        
+        with col2:
+            # Prazo com destaque
+            prazo = task.get('prazo', 'Não definido')
+            st.markdown(f"**📅 Prazo**")
+            st.markdown(f"**{prazo}**")
+            
+            # Prioridade com cor
+            prioridade = task.get('prioridade', 'media')
+            if prioridade == 'alta':
+                st.markdown("🔴 **Alta Prioridade**")
+            elif prioridade == 'media':
+                st.markdown("🟡 **Média Prioridade**")
+            elif prioridade == 'baixa':
+                st.markdown("🟢 **Baixa Prioridade**")
+        
+        st.divider()
+
+def display_entregavel_card(entregavel):
+    """Exibe um card de entregável formatado"""
+    with st.container():
+        st.markdown(f"### 📄 {entregavel.get('nome', 'Entregável')}")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.markdown(f"**Descrição:** {entregavel.get('descricao', 'Não especificada')}")
+            st.markdown(f"**Responsável:** {entregavel.get('responsavel_entrega', 'Não especificado')}")
+        
+        with col2:
+            st.markdown(f"**Formato:** {entregavel.get('formato_esperado', 'Não especificado')}")
+            st.markdown(f"**Prazo:** {entregavel.get('prazo', 'Não definido')}")
+            st.markdown(f"**Destinatário:** {entregavel.get('destinatario', 'Não especificado')}")
+        
+        st.divider()
 
 # --- Interface Principal ---
 st.title("🎯 Analisador de Reuniões de Vendas")
@@ -297,15 +434,146 @@ if st.button("🔍 Analisar Reunião com RAG", type="primary", use_container_wid
                 st.success("✅ Análise concluída!")
                 
                 # Criar abas para organizar os outputs
-                tab1, tab2 = st.tabs(["📊 Análise Principal", "📋 Outputs Adicionais"])
+                tab1, tab2, tab3, tab4, tab5 = st.tabs([
+                    "📊 Análise Principal", 
+                    "🤝 Acordos", 
+                    "✅ Tasks", 
+                    "📦 Entregáveis",
+                    "⏭️ Próximos Passos"
+                ])
                 
                 with tab1:
                     st.markdown("## Análise de Performance")
                     st.markdown(resultados["analise_principal"])
                 
                 with tab2:
-                    st.markdown("## Acordos, Tasks e Próximos Passos")
-                    st.markdown(resultados["outputs_adicionais"])
+                    st.markdown("## 🤝 Acordos e Combinados")
+                    acordos = resultados.get("outputs_json", {}).get("acordos_combinados", [])
+                    
+                    if acordos and len(acordos) > 0:
+                        for acordo in acordos:
+                            with st.container():
+                                st.markdown(f"### 📝 {acordo.get('descricao', 'Acordo')}")
+                                
+                                col1, col2 = st.columns(2)
+                                with col1:
+                                    partes = acordo.get('partes_envolvidas', [])
+                                    if partes:
+                                        st.markdown(f"**Envolvidos:** {', '.join(partes)}")
+                                
+                                with col2:
+                                    status = acordo.get('status', 'pendente')
+                                    if status == 'pendente':
+                                        st.markdown("🟡 **Status:** Pendente")
+                                    elif status == 'em_andamento':
+                                        st.markdown("🟠 **Status:** Em Andamento")
+                                    elif status == 'concluido':
+                                        st.markdown("🟢 **Status:** Concluído")
+                                
+                                condicoes = acordo.get('condicoes', '')
+                                if condicoes:
+                                    st.markdown(f"**Condições:** {condicoes}")
+                                
+                                st.divider()
+                    else:
+                        st.info("Nenhum acordo específico identificado na transcrição.")
+                        
+                        # Mostrar raw se disponível
+                        if "acordos" in resultados.get("outputs_raw", "").lower():
+                            with st.expander("Ver análise raw de acordos"):
+                                st.text(resultados["outputs_raw"])
+                
+                with tab3:
+                    st.markdown("## ✅ Tasks e Responsáveis")
+                    tasks = resultados.get("outputs_json", {}).get("tasks", [])
+                    
+                    if tasks and len(tasks) > 0:
+                        for task in tasks:
+                            display_task_card(task)
+                    else:
+                        st.info("Nenhuma task específica identificada na transcrição.")
+                        
+                        # Mostrar raw se disponível
+                        if "task" in resultados.get("outputs_raw", "").lower():
+                            with st.expander("Ver análise raw de tasks"):
+                                st.text(resultados["outputs_raw"])
+                
+                with tab4:
+                    st.markdown("## 📦 Entregáveis")
+                    entregaveis = resultados.get("outputs_json", {}).get("entregaveis", [])
+                    
+                    if entregaveis and len(entregaveis) > 0:
+                        for entregavel in entregaveis:
+                            display_entregavel_card(entregavel)
+                    else:
+                        st.info("Nenhum entregável específico identificado na transcrição.")
+                        
+                        # Mostrar raw se disponível
+                        if "entreg" in resultados.get("outputs_raw", "").lower():
+                            with st.expander("Ver análise raw de entregáveis"):
+                                st.text(resultados["outputs_raw"])
+                
+                with tab5:
+                    st.markdown("## ⏭️ Próximos Passos")
+                    proximos_passos = resultados.get("outputs_json", {}).get("proximos_passos", {})
+                    
+                    if proximos_passos:
+                        col1, col2 = st.columns(2)
+                        
+                        with col1:
+                            st.markdown("### Ações Imediatas")
+                            acoes = proximos_passos.get('acoes_imediatas', [])
+                            if acoes:
+                                for acao in acoes:
+                                    st.markdown(f"- {acao}")
+                            else:
+                                st.markdown("*Nenhuma ação imediata especificada*")
+                            
+                            st.markdown("### Preparativos para Próxima Reunião")
+                            preparativos = proximos_passos.get('preparativos_proxima_reuniao', [])
+                            if preparativos:
+                                for prep in preparativos:
+                                    st.markdown(f"- {prep}")
+                            else:
+                                st.markdown("*Nenhum preparativo especificado*")
+                        
+                        with col2:
+                            st.markdown("### Agenda Sugerida")
+                            agenda = proximos_passos.get('agenda_sugerida', [])
+                            if agenda:
+                                for i, ponto in enumerate(agenda, 1):
+                                    st.markdown(f"{i}. {ponto}")
+                            else:
+                                st.markdown("*Nenhuma agenda sugerida*")
+                            
+                            st.markdown("### Objetivos")
+                            objetivos = proximos_passos.get('objetivos_proxima_reuniao', [])
+                            if objetivos:
+                                for obj in objetivos:
+                                    st.markdown(f"🎯 {obj}")
+                            else:
+                                st.markdown("*Nenhum objetivo especificado*")
+                        
+                        # Informações adicionais
+                        st.markdown("---")
+                        col3, col4 = st.columns(2)
+                        
+                        with col3:
+                            data_sugerida = proximos_passos.get('data_sugerida', '')
+                            if data_sugerida:
+                                st.markdown(f"**📅 Data sugerida:** {data_sugerida}")
+                        
+                        with col4:
+                            participantes = proximos_passos.get('participantes_necessarios', [])
+                            if participantes:
+                                st.markdown(f"**👥 Participantes necessários:** {', '.join(participantes)}")
+                    else:
+                        st.info("Nenhum próximo passo específico identificado na transcrição.")
+                        
+                        # Mostrar raw se disponível
+                        if "próximos" in resultados.get("outputs_raw", "").lower() or "proximos" in resultados.get("outputs_raw", "").lower():
+                            with st.expander("Ver análise raw de próximos passos"):
+                                st.text(resultados["outputs_raw"])
                 
                 # Preparar conteúdo completo para download
                 conteudo_completo = f"""
@@ -321,10 +589,16 @@ Data: {datetime.datetime.now().strftime('%d/%m/%Y %H:%M')}
 {resultados["analise_principal"]}
 
 ===========================================
-2. ACORDOS, TASKS E PRÓXIMOS PASSOS
+2. OUTPUTS ESTRUTURADOS (RAW)
 ===========================================
 
-{resultados["outputs_adicionais"]}
+{resultados["outputs_raw"]}
+
+===========================================
+3. OUTPUTS ESTRUTURADOS (JSON)
+===========================================
+
+{json.dumps(resultados.get("outputs_json", {}), indent=2, ensure_ascii=False)}
                 """
                 
                 # Botão de download
@@ -342,7 +616,7 @@ Data: {datetime.datetime.now().strftime('%d/%m/%Y %H:%M')}
 
 # --- Rodapé ---
 st.markdown("---")
-st.caption(f"Analisador de Reuniões de Vendas • v2.0 com Outputs Estruturados • {datetime.datetime.now().year}")
+st.caption(f"Analisador de Reuniões de Vendas • v3.0 com Cards de Tasks • {datetime.datetime.now().year}")
 
 # Sidebar com instruções
 with st.sidebar:
@@ -352,18 +626,18 @@ with st.sidebar:
     
     - **RAG (Retrieval-Augmented Generation)** com base de conhecimento especializada
     - **Metodologias** de Chris Voss, SPIN Selling, Challenger Sale e mais
-    - **Outputs estruturados** para acionabilidade
+    - **Outputs estruturados** em formato JSON para melhor visualização
     
     ### Outputs Gerados:
     1. **Análise Principal**: Performance do vendedor, pontos fortes/melhoria, score
-    2. **Acordos e Combinados**: Compromissos estabelecidos
-    3. **Tasks**: Tarefas com responsável, prazo e entregáveis
-    4. **Entregáveis**: Materiais e documentos necessários
-    5. **Próximos Passos**: Agenda para próxima reunião
+    2. **Acordos e Combinados**: Compromissos estabelecidos com status
+    3. **Tasks**: Cards detalhados com responsável (nome e cargo), prazo, ferramentas, entrega e reporte
+    4. **Entregáveis**: Cards com especificações completas
+    5. **Próximos Passos**: Ações, agenda e objetivos estruturados
     
     ### Como usar:
     1. Cole a transcrição completa
     2. Clique em "Analisar"
-    3. Consulte as abas com os resultados
+    3. Consulte as abas com os resultados organizados
     4. Faça o download da análise completa
     """)
