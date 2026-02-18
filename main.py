@@ -5,6 +5,7 @@ import datetime
 import os
 from typing import List, Dict
 import openai
+import json
 
 # Configurações das credenciais
 OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
@@ -177,8 +178,28 @@ Gestão de objeções
 Capacidade de fechamento.
 """
 
-def analisar_reuniao_com_rag(transcricao: str) -> str:
-    """Analisa uma transcrição de reunião usando RAG"""
+SYSTEM_PROMPT_OUTPUTS_ADICIONAIS = """
+Com base na análise da transcrição da reunião de vendas fornecida, gere os seguintes outputs estruturados:
+
+1. **ACORDOS E COMBINADOS**: Liste todos os acordos verbais, compromissos e combinações feitas durante a reunião entre vendedor e cliente. Seja específico sobre o que foi acordado.
+
+2. **TASKS (TAREFAS)**: Para cada tarefa identificada, forneça:
+   - Pessoa responsável (identificada pelo nome ou cargo)
+   - Descrição clara da tarefa
+   - Prazo (se mencionado ou sugerido)
+   - Ferramentas necessárias para execução
+   - Entrega final esperada
+   - A quem reportar o resultado
+
+3. **ENTREGÁVEIS**: Liste todos os materiais, documentos, propostas ou qualquer item que precise ser entregue por qualquer uma das partes, com especificações claras.
+
+4. **PRÓXIMOS PASSOS E ATIVIDADES PARA PRÓXIMA REUNIÃO**: Descreva claramente o que deve acontecer após esta reunião, incluindo preparativos necessários, agenda sugerida para o próximo encontro e objetivos da próxima interação.
+
+Formate a resposta com títulos claros para cada seção e use marcadores para facilitar a leitura.
+"""
+
+def analisar_reuniao_com_rag(transcricao: str) -> Dict[str, str]:
+    """Analisa uma transcrição de reunião usando RAG e gera outputs adicionais"""
     
     try:
         # Gera embedding para busca na base de conhecimento
@@ -196,8 +217,8 @@ def analisar_reuniao_com_rag(transcricao: str) -> str:
                 doc_clean = doc_content.replace('{', '').replace('}', '').replace("'", "").replace('"', '')
                 rag_context += f"--- Fonte {i} ---\n{doc_clean[:300]}...\n\n"
         
-        # Construir prompt final
-        prompt_final = f"""
+        # Construir prompt para análise principal
+        prompt_analise = f"""
         {SYSTEM_PROMPT_ANALISE}
         
         {rag_context}
@@ -212,12 +233,44 @@ def analisar_reuniao_com_rag(transcricao: str) -> str:
         IMPORTANTE: Seja específico, cite trechos da transcrição quando relevante, e dê feedback acionável.
         """
         
-        # Gera análise
-        response = modelo_analise.generate_content(prompt_final)
-        return response.text
+        # Gera análise principal
+        response_analise = modelo_analise.generate_content(prompt_analise)
+        analise_principal = response_analise.text
+        
+        # Construir prompt para outputs adicionais baseados na análise
+        prompt_outputs = f"""
+        {SYSTEM_PROMPT_OUTPUTS_ADICIONAIS}
+        
+        ## ANÁLISE PRINCIPAL DA REUNIÃO:
+        {analise_principal}
+        
+        ## TRANSCRIÇÃO ORIGINAL:
+        {transcricao}
+        
+        ## BASE DE CONHECIMENTO UTILIZADA:
+        {rag_context}
+        
+        ## SUA TAREFA:
+        
+        Com base na análise acima e na transcrição original, gere os outputs adicionais solicitados.
+        Seja extremamente detalhista e específico. Para as tasks, sempre identifique a pessoa responsável pelo nome ou cargo mencionado na transcrição.
+        Se alguma informação não estiver disponível na transcrição, indique como "Não especificado" ou sugira com base no contexto da análise.
+        """
+        
+        # Gera outputs adicionais
+        response_outputs = modelo_analise.generate_content(prompt_outputs)
+        outputs_adicionais = response_outputs.text
+        
+        return {
+            "analise_principal": analise_principal,
+            "outputs_adicionais": outputs_adicionais
+        }
         
     except Exception as e:
-        return f"Erro na análise: {str(e)}"
+        return {
+            "analise_principal": f"Erro na análise: {str(e)}",
+            "outputs_adicionais": f"Erro ao gerar outputs adicionais: {str(e)}"
+        }
 
 # --- Interface Principal ---
 st.title("🎯 Analisador de Reuniões de Vendas")
@@ -237,24 +290,80 @@ Cliente: Temos problemas com produtividade da equipe...
 
 if st.button("🔍 Analisar Reunião com RAG", type="primary", use_container_width=True):
     if transcricao_texto:
-        with st.spinner("Analisando com base de conhecimento..."):
-            resultado = analisar_reuniao_com_rag(transcricao_texto)
+        with st.spinner("Analisando com base de conhecimento e gerando outputs estruturados..."):
+            resultados = analisar_reuniao_com_rag(transcricao_texto)
             
-            # Mostrar resultado
-            st.success("✅ Análise concluída!")
-            st.markdown(resultado)
-            
-            # Botão de download
-            st.download_button(
-                "💾 Baixar Análise",
-                data=resultado,
-                file_name=f"analise_reuniao_{datetime.datetime.now().strftime('%Y%m%d_%H%M')}.txt",
-                mime="text/plain",
-                use_container_width=True
-            )
+            if "Erro" not in resultados["analise_principal"]:
+                st.success("✅ Análise concluída!")
+                
+                # Criar abas para organizar os outputs
+                tab1, tab2 = st.tabs(["📊 Análise Principal", "📋 Outputs Adicionais"])
+                
+                with tab1:
+                    st.markdown("## Análise de Performance")
+                    st.markdown(resultados["analise_principal"])
+                
+                with tab2:
+                    st.markdown("## Acordos, Tasks e Próximos Passos")
+                    st.markdown(resultados["outputs_adicionais"])
+                
+                # Preparar conteúdo completo para download
+                conteudo_completo = f"""
+===========================================
+ANÁLISE DE REUNIÃO DE VENDAS
+Data: {datetime.datetime.now().strftime('%d/%m/%Y %H:%M')}
+===========================================
+
+===========================================
+1. ANÁLISE PRINCIPAL
+===========================================
+
+{resultados["analise_principal"]}
+
+===========================================
+2. ACORDOS, TASKS E PRÓXIMOS PASSOS
+===========================================
+
+{resultados["outputs_adicionais"]}
+                """
+                
+                # Botão de download
+                st.download_button(
+                    "💾 Baixar Análise Completa",
+                    data=conteudo_completo,
+                    file_name=f"analise_completa_reuniao_{datetime.datetime.now().strftime('%Y%m%d_%H%M')}.txt",
+                    mime="text/plain",
+                    use_container_width=True
+                )
+            else:
+                st.error(resultados["analise_principal"])
     else:
         st.warning("Por favor, cole a transcrição da reunião.")
 
 # --- Rodapé ---
 st.markdown("---")
-st.caption(f"Analisador de Reuniões • v1.0 • {datetime.datetime.now().year}")
+st.caption(f"Analisador de Reuniões de Vendas • v2.0 com Outputs Estruturados • {datetime.datetime.now().year}")
+
+# Sidebar com instruções
+with st.sidebar:
+    st.header("📋 Sobre o Analisador")
+    st.markdown("""
+    Esta ferramenta analisa transcrições de reuniões de vendas complexas utilizando:
+    
+    - **RAG (Retrieval-Augmented Generation)** com base de conhecimento especializada
+    - **Metodologias** de Chris Voss, SPIN Selling, Challenger Sale e mais
+    - **Outputs estruturados** para acionabilidade
+    
+    ### Outputs Gerados:
+    1. **Análise Principal**: Performance do vendedor, pontos fortes/melhoria, score
+    2. **Acordos e Combinados**: Compromissos estabelecidos
+    3. **Tasks**: Tarefas com responsável, prazo e entregáveis
+    4. **Entregáveis**: Materiais e documentos necessários
+    5. **Próximos Passos**: Agenda para próxima reunião
+    
+    ### Como usar:
+    1. Cole a transcrição completa
+    2. Clique em "Analisar"
+    3. Consulte as abas com os resultados
+    4. Faça o download da análise completa
+    """)
