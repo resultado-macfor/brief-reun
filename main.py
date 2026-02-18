@@ -7,6 +7,10 @@ from typing import List, Dict
 import openai
 import json
 import re
+import pandas as pd
+import plotly.express as px
+import plotly.graph_objects as go
+from collections import Counter
 
 # Configurações das credenciais
 OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
@@ -20,7 +24,7 @@ gemini_api_key = os.getenv("GEM_API_KEY")
 st.set_page_config(
     page_title="Analisador de Reuniões de Vendas",
     page_icon="🎯",
-    layout="centered"
+    layout="wide"
 )
 
 class AstraDBClient:
@@ -78,7 +82,7 @@ if not gemini_api_key:
 genai.configure(api_key=gemini_api_key)
 modelo_analise = genai.GenerativeModel("gemini-2.5-flash")
 
-# --- SYSTEM PROMPT ---
+# --- SYSTEM PROMPTS ---
 SYSTEM_PROMPT_ANALISE = """
 Você é um agente de inteligência artificial especializado em analisar transcrições de calls de vendas complexas (B2B enterprise), com foco em avaliar a performance de vendedores (closers ou account executives) em ciclos de vendas longos e com múltiplos stakeholders.
 
@@ -233,6 +237,37 @@ Formato JSON OBRIGATÓRIO:
         "objetivos_proxima_reuniao": ["objetivo1", "objetivo2"],
         "data_sugerida": "Data/horário sugerido para próxima reunião",
         "participantes_necessarios": ["participantes que devem estar presentes"]
+    },
+    "analise_quantitativa": {
+        "participantes": [
+            {
+                "nome": "Nome do participante",
+                "papel": "vendedor/cliente/outro",
+                "metricas": {
+                    "tempo_fala_segundos": 0,
+                    "numero_falas": 0,
+                    "palavras_por_fala": 0,
+                    "perguntas_feitas": 0,
+                    "objeções_levantadas": 0,
+                    "acordos_propostos": 0
+                },
+                "qualidade_performance": {
+                    "clareza_comunicacao": 0-10,
+                    "escuta_ativa": 0-10,
+                    "persuasao": 0-10,
+                    "dominio_conteudo": 0-10,
+                    "gestao_objeções": 0-10,
+                    "fechamento": 0-10
+                }
+            }
+        ],
+        "estatisticas_gerais": {
+            "duracao_total_segundos": 0,
+            "total_falas": 0,
+            "equilibrio_participacao": 0.0,
+            "indice_colaboracao": 0.0,
+            "densidade_informacao": 0.0
+        }
     }
 }
 
@@ -242,6 +277,7 @@ REGRAS IMPORTANTES:
 3. Para tasks, identifique responsáveis mesmo que indiretamente (ex: "vou enviar" = responsável é quem fala)
 4. Entregáveis são COMBINADOS na reunião - documentos, propostas, materiais que foram acordados
 5. Seja extremamente fiel à transcrição original - não invente informações
+6. Para análise quantitativa, estime métricas com base na transcrição (tempo de fala proporcional ao número de palavras)
 """
 
 def analisar_reuniao_com_rag(transcricao: str) -> Dict[str, str]:
@@ -284,7 +320,6 @@ def analisar_reuniao_com_rag(transcricao: str) -> Dict[str, str]:
         analise_principal = response_analise.text
         
         # Construir prompt para outputs adicionais em formato JSON
-        # AGORA USANDO TANTO A TRANSCRIÇÃO QUANTO A ANÁLISE
         prompt_outputs = f"""
         {SYSTEM_PROMPT_OUTPUTS_ADICIONAIS}
         
@@ -300,10 +335,11 @@ def analisar_reuniao_com_rag(transcricao: str) -> Dict[str, str]:
         ## INSTRUÇÕES CRÍTICAS:
         
         1. A TRANSCRIÇÃO ORIGINAL é sua fonte primária - extraia dela todas as informações factuais
-        2. Use a análise RAPENAS como contexto para entender melhor o que foi dito
+        2. Use a análise RAG apenas como contexto para entender melhor o que foi dito
         3. Para cada acordo, task e entregável, INCLUA O TRECHO EXATO da transcrição como evidência
         4. Seja extremamente detalhista - a transcrição contém muitas informações que precisam ser capturadas
         5. Identifique entregáveis como: propostas, documentos, termos, cases, budgets - tudo que foi COMBINADO entregar
+        6. Para ANÁLISE QUANTITATIVA, identifique todos os participantes e atribua notas de qualidade
         
         Gere agora o JSON completo com todos os outputs estruturados baseados na transcrição original.
         """
@@ -328,9 +364,13 @@ def analisar_reuniao_com_rag(transcricao: str) -> Dict[str, str]:
                     outputs_json["entregaveis"] = []
                 if not outputs_json.get("proximos_passos"):
                     outputs_json["proximos_passos"] = {}
+                if not outputs_json.get("analise_quantitativa"):
+                    outputs_json["analise_quantitativa"] = {
+                        "participantes": [],
+                        "estatisticas_gerais": {}
+                    }
                     
             except json.JSONDecodeError as e:
-                # Se falhar o parse, retorna o texto original com erro
                 outputs_json = {
                     "erro": f"Falha ao parsear JSON: {str(e)}", 
                     "texto_original": outputs_text[:1000] + "..."
@@ -354,6 +394,311 @@ def analisar_reuniao_com_rag(transcricao: str) -> Dict[str, str]:
             "outputs_raw": ""
         }
 
+def criar_dashboard_quantitativo(dados_quantitativos):
+    """Cria dashboard com gráficos e análises quantitativas"""
+    
+    participantes = dados_quantitativos.get("participantes", [])
+    estatisticas = dados_quantitativos.get("estatisticas_gerais", {})
+    
+    if not participantes:
+        st.warning("Dados quantitativos não disponíveis para esta análise.")
+        return
+    
+    # Métricas gerais em cards
+    st.markdown("## 📊 Estatísticas Gerais da Reunião")
+    
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        duracao = estatisticas.get('duracao_total_segundos', 0)
+        minutos = duracao // 60
+        segundos = duracao % 60
+        st.metric(
+            "⏱️ Duração Total",
+            f"{minutos}:{segundos:02d} min",
+            help="Tempo total estimado da reunião"
+        )
+    
+    with col2:
+        st.metric(
+            "💬 Total de Falas",
+            estatisticas.get('total_falas', 0),
+            help="Número total de intervenções na conversa"
+        )
+    
+    with col3:
+        equilibrio = estatisticas.get('equilibrio_participacao', 0)
+        st.metric(
+            "⚖️ Equilíbrio de Participação",
+            f"{equilibrio:.1%}",
+            delta=None if equilibrio > 0.3 else "Baixo equilíbrio",
+            help="Quanto mais próximo de 50%, mais equilibrada a conversa"
+        )
+    
+    with col4:
+        densidade = estatisticas.get('densidade_informacao', 0)
+        st.metric(
+            "📈 Densidade de Informação",
+            f"{densidade:.1f}",
+            help="Quantidade de informação por minuto de conversa"
+        )
+    
+    st.markdown("---")
+    
+    # Gráfico de tempo de fala por participante
+    st.markdown("## 🎤 Distribuição de Tempo de Fala")
+    
+    df_tempo = pd.DataFrame([
+        {
+            "Participante": p["nome"],
+            "Papel": p["papel"].capitalize(),
+            "Tempo (minutos)": p["metricas"]["tempo_fala_segundos"] / 60,
+            "Número de Falas": p["metricas"]["numero_falas"],
+            "Média de Palavras por Fala": p["metricas"]["palavras_por_fala"]
+        }
+        for p in participantes
+    ])
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        fig_tempo = px.pie(
+            df_tempo,
+            values="Tempo (minutos)",
+            names="Participante",
+            title="Distribuição do Tempo de Fala",
+            color_discrete_sequence=px.colors.qualitative.Set3,
+            hole=0.4
+        )
+        fig_tempo.update_traces(textposition='inside', textinfo='percent+label')
+        st.plotly_chart(fig_tempo, use_container_width=True)
+    
+    with col2:
+        fig_falas = px.bar(
+            df_tempo,
+            x="Participante",
+            y="Número de Falas",
+            color="Papel",
+            title="Número de Intervenções por Participante",
+            text_auto=True
+        )
+        fig_falas.update_layout(showlegend=True)
+        st.plotly_chart(fig_falas, use_container_width=True)
+    
+    st.markdown("---")
+    
+    # Análise de qualidade por participante
+    st.markdown("## ⭐ Análise de Qualidade por Participante")
+    
+    # Preparar dados para radar chart
+    metricas_qualidade = [
+        "clareza_comunicacao",
+        "escuta_ativa",
+        "persuasao",
+        "dominio_conteudo",
+        "gestao_objeções",
+        "fechamento"
+    ]
+    
+    nomes_metricas = [
+        "Clareza",
+        "Escuta Ativa",
+        "Persuasão",
+        "Domínio do Conteúdo",
+        "Gestão de Objeções",
+        "Fechamento"
+    ]
+    
+    # Criar radar chart para cada participante
+    tabs = st.tabs([p["nome"] for p in participantes])
+    
+    for idx, (tab, participante) in enumerate(zip(tabs, participantes)):
+        with tab:
+            col1, col2 = st.columns([2, 1])
+            
+            with col1:
+                # Radar chart
+                valores = [
+                    participante["qualidade_performance"].get(m, 0)
+                    for m in metricas_qualidade
+                ]
+                
+                fig_radar = go.Figure()
+                
+                fig_radar.add_trace(go.Scatterpolar(
+                    r=valores + [valores[0]],
+                    theta=nomes_metricas + [nomes_metricas[0]],
+                    fill='toself',
+                    name=participante["nome"],
+                    line_color='rgb(31, 119, 180)',
+                    opacity=0.8
+                ))
+                
+                fig_radar.update_layout(
+                    polar=dict(
+                        radialaxis=dict(
+                            visible=True,
+                            range=[0, 10]
+                        )),
+                    showlegend=False,
+                    title=f"Perfil de Performance - {participante['nome']}"
+                )
+                
+                st.plotly_chart(fig_radar, use_container_width=True)
+            
+            with col2:
+                st.markdown(f"### 📋 Detalhes")
+                st.markdown(f"**Papel:** {participante['papel'].capitalize()}")
+                st.markdown("**Métricas de Participação:**")
+                st.markdown(f"- 🕐 Tempo de fala: {participante['metricas']['tempo_fala_segundos']//60}:{participante['metricas']['tempo_fala_segundos']%60:02d} min")
+                st.markdown(f"- 💬 Falas: {participante['metricas']['numero_falas']}")
+                st.markdown(f"- 📝 Média palavras/fala: {participante['metricas']['palavras_por_fala']:.0f}")
+                st.markdown(f"- ❓ Perguntas feitas: {participante['metricas']['perguntas_feitas']}")
+                st.markdown(f"- 🚫 Objeções levantadas: {participante['metricas']['objeções_levantadas']}")
+                
+                # Nota média
+                media = sum(valores) / len(valores)
+                st.markdown(f"### 🏆 Nota Média: {media:.1f}/10")
+    
+    st.markdown("---")
+    
+    # Comparativo de desempenho
+    st.markdown("## 📈 Comparativo de Desempenho")
+    
+    # DataFrame para comparação
+    df_comparativo = pd.DataFrame([
+        {
+            "Participante": p["nome"],
+            **{nomes_metricas[i]: p["qualidade_performance"].get(m, 0) 
+               for i, m in enumerate(metricas_qualidade)}
+        }
+        for p in participantes
+    ])
+    
+    # Gráfico de barras agrupadas
+    fig_comparativo = go.Figure()
+    
+    for metrica in nomes_metricas:
+        fig_comparativo.add_trace(go.Bar(
+            name=metrica,
+            x=df_comparativo["Participante"],
+            y=df_comparativo[metrica],
+            text=df_comparativo[metrica],
+            textposition='auto',
+        ))
+    
+    fig_comparativo.update_layout(
+        title="Comparação de Métricas por Participante",
+        xaxis_title="Participante",
+        yaxis_title="Nota (0-10)",
+        barmode='group',
+        bargap=0.15,
+        bargroupgap=0.1
+    )
+    
+    st.plotly_chart(fig_comparativo, use_container_width=True)
+    
+    st.markdown("---")
+    
+    # Análise de interações
+    st.markdown("## 🔍 Análise de Interações")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        # Perguntas vs Objeções
+        df_interacoes = pd.DataFrame([
+            {
+                "Participante": p["nome"],
+                "Perguntas": p["metricas"]["perguntas_feitas"],
+                "Objeções": p["metricas"]["objeções_levantadas"],
+                "Acordos": p["metricas"]["acordos_propostos"]
+            }
+            for p in participantes
+        ])
+        
+        fig_interacoes = go.Figure()
+        
+        fig_interacoes.add_trace(go.Bar(
+            name="Perguntas",
+            x=df_interacoes["Participante"],
+            y=df_interacoes["Perguntas"],
+            marker_color='rgb(55, 83, 109)'
+        ))
+        
+        fig_interacoes.add_trace(go.Bar(
+            name="Objeções",
+            x=df_interacoes["Participante"],
+            y=df_interacoes["Objeções"],
+            marker_color='rgb(219, 64, 82)'
+        ))
+        
+        fig_interacoes.add_trace(go.Bar(
+            name="Acordos",
+            x=df_interacoes["Participante"],
+            y=df_interacoes["Acordos"],
+            marker_color='rgb(26, 118, 255)'
+        ))
+        
+        fig_interacoes.update_layout(
+            title="Tipos de Interação por Participante",
+            xaxis_title="Participante",
+            yaxis_title="Quantidade",
+            barmode='group'
+        )
+        
+        st.plotly_chart(fig_interacoes, use_container_width=True)
+    
+    with col2:
+        # Scorecard resumo
+        st.markdown("### 📊 Scorecard da Reunião")
+        
+        score_total = sum([
+            p["qualidade_performance"].get("clareza_comunicacao", 0) * 0.2 +
+            p["qualidade_performance"].get("escuta_ativa", 0) * 0.2 +
+            p["qualidade_performance"].get("persuasao", 0) * 0.2 +
+            p["qualidade_performance"].get("dominio_conteudo", 0) * 0.2 +
+            p["qualidade_performance"].get("gestao_objeções", 0) * 0.1 +
+            p["qualidade_performance"].get("fechamento", 0) * 0.1
+            for p in participantes if p["papel"] == "vendedor"
+        ])
+        
+        if score_total > 0:
+            st.metric(
+                "🎯 Efetividade do Vendedor",
+                f"{score_total:.1f}/10",
+                delta=None
+            )
+        
+        # Insights automáticos
+        st.markdown("### 💡 Insights Rápidos")
+        
+        insights = []
+        
+        # Verificar equilíbrio
+        if estatisticas.get('equilibrio_participacao', 0) < 0.3:
+            insights.append("⚠️ Conversa muito concentrada em poucos participantes")
+        elif estatisticas.get('equilibrio_participacao', 0) > 0.45:
+            insights.append("✅ Ótimo equilíbrio de participação")
+        
+        # Verificar engajamento do cliente
+        for p in participantes:
+            if p["papel"] == "cliente" and p["metricas"]["perguntas_feitas"] < 2:
+                insights.append("⚠️ Cliente pouco questionador - pode indicar baixo engajamento")
+            elif p["papel"] == "cliente" and p["metricas"]["perguntas_feitas"] > 5:
+                insights.append("💪 Cliente altamente engajado - fez muitas perguntas")
+        
+        # Verificar objeções
+        total_objeções = sum(p["metricas"]["objeções_levantadas"] for p in participantes)
+        if total_objeções > 3:
+            insights.append("🔄 Muitas objeções levantadas - reunião de alta complexidade")
+        
+        if not insights:
+            insights.append("📊 Reunião dentro dos padrões esperados")
+        
+        for insight in insights:
+            st.markdown(insight)
+
 def display_task_card(task):
     """Exibe um card de task formatado"""
     responsavel = task.get('responsavel', {})
@@ -361,12 +706,10 @@ def display_task_card(task):
     evidencia = task.get('evidencia_transcricao', '')
     
     with st.container():
-        # Cabeçalho da task com expander para evidência
-        with st.expander(f"✅ {task.get('descricao', 'Task sem descrição')}", expanded=True):
+        with st.expander(f"✅ {task.get('descricao', 'Task sem descrição')}", expanded=False):
             col1, col2 = st.columns([3, 1])
             
             with col1:
-                # Responsável com ícone
                 nome_resp = responsavel.get('nome', 'Não especificado')
                 cargo_resp = responsavel.get('cargo', '')
                 if cargo_resp:
@@ -374,17 +717,14 @@ def display_task_card(task):
                 else:
                     st.markdown(f"👤 **Responsável:** {nome_resp}")
                 
-                # Ferramentas
                 ferramentas = task.get('ferramentas_necessarias', [])
                 if ferramentas and ferramentas[0]:
                     st.markdown(f"🛠️ **Ferramentas:** {', '.join(ferramentas)}")
                 
-                # Entrega final
                 entrega = task.get('entrega_final', '')
                 if entrega:
                     st.markdown(f"📦 **Entrega:** {entrega}")
                 
-                # Reportar para
                 if reportar_para and reportar_para.get('nome'):
                     nome_report = reportar_para.get('nome', '')
                     cargo_report = reportar_para.get('cargo', '')
@@ -393,24 +733,20 @@ def display_task_card(task):
                     else:
                         st.markdown(f"📊 **Reportar para:** {nome_report}")
                 
-                # Dependências
                 dependencias = task.get('dependencias', [])
                 if dependencias and dependencias[0]:
                     st.markdown(f"⛓️ **Depende de:** {', '.join(dependencias)}")
                 
-                # Evidência da transcrição
                 if evidencia:
                     st.markdown("---")
                     st.markdown("📝 **Evidência na transcrição:**")
                     st.markdown(f"> *{evidencia}*")
             
             with col2:
-                # Prazo com destaque
                 prazo = task.get('prazo', 'Não definido')
                 st.markdown(f"**📅 Prazo**")
                 st.markdown(f"**{prazo}**")
                 
-                # Prioridade com cor
                 prioridade = task.get('prioridade', 'media')
                 if prioridade == 'alta':
                     st.markdown("🔴 **Alta Prioridade**")
@@ -424,7 +760,7 @@ def display_entregavel_card(entregavel):
     evidencia = entregavel.get('evidencia_transcricao', '')
     
     with st.container():
-        with st.expander(f"📄 {entregavel.get('nome', 'Entregável')}", expanded=True):
+        with st.expander(f"📄 {entregavel.get('nome', 'Entregável')}", expanded=False):
             col1, col2 = st.columns(2)
             
             with col1:
@@ -445,7 +781,7 @@ def display_acordo_card(acordo):
     evidencia = acordo.get('evidencia_transcricao', '')
     
     with st.container():
-        with st.expander(f"🤝 {acordo.get('descricao', 'Acordo')}", expanded=True):
+        with st.expander(f"🤝 {acordo.get('descricao', 'Acordo')}", expanded=False):
             col1, col2 = st.columns(2)
             
             with col1:
@@ -478,7 +814,7 @@ st.markdown("Cole a transcrição da reunião para receber uma análise completa
 # Área para transcrição
 transcricao_texto = st.text_area(
     "Transcrição da reunião:", 
-    height=300,
+    height=200,
     placeholder="""Vendedor: Bom dia! Como vai?
 Cliente: Bem, obrigado!
 Vendedor: Antes de começarmos, poderia me contar sobre seus principais desafios atuais?
@@ -496,8 +832,9 @@ if st.button("🔍 Analisar Reunião com RAG", type="primary", use_container_wid
                 st.success("✅ Análise concluída!")
                 
                 # Criar abas para organizar os outputs
-                tab1, tab2, tab3, tab4, tab5 = st.tabs([
+                tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
                     "📊 Análise Principal", 
+                    "📈 Análise Quantitativa",
                     "🤝 Acordos", 
                     "✅ Tasks", 
                     "📦 Entregáveis",
@@ -509,6 +846,10 @@ if st.button("🔍 Analisar Reunião com RAG", type="primary", use_container_wid
                     st.markdown(resultados["analise_principal"])
                 
                 with tab2:
+                    dados_quantitativos = resultados.get("outputs_json", {}).get("analise_quantitativa", {})
+                    criar_dashboard_quantitativo(dados_quantitativos)
+                
+                with tab3:
                     st.markdown("## 🤝 Acordos e Combinados")
                     st.markdown("*Acordos verbais identificados na transcrição*")
                     acordos = resultados.get("outputs_json", {}).get("acordos_combinados", [])
@@ -518,13 +859,8 @@ if st.button("🔍 Analisar Reunião com RAG", type="primary", use_container_wid
                             display_acordo_card(acordo)
                     else:
                         st.info("Nenhum acordo específico identificado na transcrição.")
-                        
-                        # Mostrar raw se disponível
-                        if resultados.get("outputs_raw"):
-                            with st.expander("Ver análise raw"):
-                                st.text(resultados["outputs_raw"])
                 
-                with tab3:
+                with tab4:
                     st.markdown("## ✅ Tasks e Responsáveis")
                     st.markdown("*Tarefas identificadas com responsáveis e prazos*")
                     tasks = resultados.get("outputs_json", {}).get("tasks", [])
@@ -534,13 +870,8 @@ if st.button("🔍 Analisar Reunião com RAG", type="primary", use_container_wid
                             display_task_card(task)
                     else:
                         st.info("Nenhuma task específica identificada na transcrição.")
-                        
-                        # Mostrar raw se disponível
-                        if resultados.get("outputs_raw"):
-                            with st.expander("Ver análise raw"):
-                                st.text(resultados["outputs_raw"])
                 
-                with tab4:
+                with tab5:
                     st.markdown("## 📦 Entregáveis Combinados")
                     st.markdown("*Documentos, propostas e materiais acordados durante a reunião*")
                     entregaveis = resultados.get("outputs_json", {}).get("entregaveis", [])
@@ -550,13 +881,8 @@ if st.button("🔍 Analisar Reunião com RAG", type="primary", use_container_wid
                             display_entregavel_card(entregavel)
                     else:
                         st.info("Nenhum entregável específico identificado na transcrição.")
-                        
-                        # Mostrar raw se disponível
-                        if resultados.get("outputs_raw"):
-                            with st.expander("Ver análise raw"):
-                                st.text(resultados["outputs_raw"])
                 
-                with tab5:
+                with tab6:
                     st.markdown("## ⏭️ Próximos Passos")
                     st.markdown("*Encaminhamentos e agenda para continuidade*")
                     proximos_passos = resultados.get("outputs_json", {}).get("proximos_passos", {})
@@ -598,7 +924,6 @@ if st.button("🔍 Analisar Reunião com RAG", type="primary", use_container_wid
                             else:
                                 st.markdown("*Nenhum objetivo especificado*")
                         
-                        # Informações adicionais
                         st.markdown("---")
                         col3, col4 = st.columns(2)
                         
@@ -613,11 +938,6 @@ if st.button("🔍 Analisar Reunião com RAG", type="primary", use_container_wid
                                 st.markdown(f"**👥 Participantes necessários:** {', '.join(participantes)}")
                     else:
                         st.info("Nenhum próximo passo específico identificado na transcrição.")
-                        
-                        # Mostrar raw se disponível
-                        if resultados.get("outputs_raw"):
-                            with st.expander("Ver análise raw"):
-                                st.text(resultados["outputs_raw"])
                 
                 # Preparar conteúdo completo para download
                 conteudo_completo = f"""
@@ -639,16 +959,16 @@ Data: {datetime.datetime.now().strftime('%d/%m/%Y %H:%M')}
 {resultados["analise_principal"]}
 
 ===========================================
-3. OUTPUTS ESTRUTURADOS (JSON)
+3. ANÁLISE QUANTITATIVA
+===========================================
+
+{json.dumps(resultados.get("outputs_json", {}).get("analise_quantitativa", {}), indent=2, ensure_ascii=False)}
+
+===========================================
+4. OUTPUTS ESTRUTURADOS COMPLETOS
 ===========================================
 
 {json.dumps(resultados.get("outputs_json", {}), indent=2, ensure_ascii=False)}
-
-===========================================
-4. OUTPUTS ESTRUTURADOS (RAW)
-===========================================
-
-{resultados["outputs_raw"]}
                 """
                 
                 # Botão de download
@@ -666,7 +986,7 @@ Data: {datetime.datetime.now().strftime('%d/%m/%Y %H:%M')}
 
 # --- Rodapé ---
 st.markdown("---")
-st.caption(f"Analisador de Reuniões de Vendas • v3.1 com Extração Direta da Transcrição • {datetime.datetime.now().year}")
+st.caption(f"Analisador de Reuniões de Vendas • v4.0 com Análise Quantitativa • {datetime.datetime.now().year}")
 
 # Sidebar com instruções
 with st.sidebar:
@@ -676,18 +996,25 @@ with st.sidebar:
     
     - **RAG (Retrieval-Augmented Generation)** com base de conhecimento especializada
     - **Extração direta da transcrição** para outputs estruturados
+    - **Análise quantitativa** com gráficos e métricas
     - **Evidências textuais** para cada item identificado
     
     ### Outputs Gerados:
     1. **Análise Principal**: Performance do vendedor com base em metodologias
-    2. **Acordos**: Compromissos verbais com trechos da transcrição
-    3. **Tasks**: Cards detalhados com responsável, prazo e evidência
-    4. **Entregáveis**: Documentos e materiais COMBINADOS na reunião
-    5. **Próximos Passos**: Encaminhamentos e agenda
+    2. **Análise Quantitativa**: 
+       - Distribuição de tempo de fala
+       - Perfil de performance por participante (radar charts)
+       - Comparativo de métricas
+       - Insights automáticos
+    3. **Acordos**: Compromissos verbais com evidências
+    4. **Tasks**: Cards detalhados com responsável e prazo
+    5. **Entregáveis**: Documentos e materiais COMBINADOS
+    6. **Próximos Passos**: Encaminhamentos e agenda
     
     ### Diferenciais:
-    - ✅ Usa a TRANSCRIÇÃO ORIGINAL como fonte primária
-    - ✅ Inclui evidências textuais para cada item
-    - ✅ Identifica entregáveis combinados (não apenas tarefas)
-    - ✅ Responsáveis claramente identificados por nome/cargo
+    - ✅ Dashboard interativo com gráficos Plotly
+    - ✅ Análise comparativa entre participantes
+    - ✅ Radar charts de performance individual
+    - ✅ Métricas quantitativas de participação
+    - ✅ Insights automáticos baseados em dados
     """)
