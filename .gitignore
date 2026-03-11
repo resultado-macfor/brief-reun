@@ -1,0 +1,29 @@
+# Variáveis de ambiente e segredos
+.env
+.env.*
+*.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+
+# Virtualenv
+venv/
+.venv/
+env/
+.env/
+
+# IDE
+.vscode/
+.idea/
+
+# Logs
+*.log
+
+# Distribuição / build
+dist/
+build/
+*.egg-info/
