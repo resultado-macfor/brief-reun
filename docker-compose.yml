@@ -34,7 +34,7 @@ services:
       - certbot-www:/var/www/certbot
     entrypoint: >
       sh -c "certbot certonly --webroot -w /var/www/certbot
-      -d api.scorecard-macfor.com
+      -d api.macfor.ag
       --email rafael.goncalves@macfor.com.br
       --agree-tos --non-interactive --keep-until-expiring"
 
