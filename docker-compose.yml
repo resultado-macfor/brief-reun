@@ -1,0 +1,48 @@
+services:
+  api:
+    build: .
+    container_name: brief-reun-api
+    restart: always
+    env_file: .env
+    expose:
+      - "5000"
+    volumes:
+      - logs:/var/log/brief-reun
+    networks:
+      - web
+
+  nginx:
+    image: nginx:alpine
+    container_name: brief-reun-nginx
+    restart: always
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./deploy/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - certs:/etc/letsencrypt:ro
+      - certbot-www:/var/www/certbot:ro
+    depends_on:
+      - api
+    networks:
+      - web
+
+  certbot:
+    image: certbot/certbot
+    volumes:
+      - certs:/etc/letsencrypt
+      - certbot-www:/var/www/certbot
+    entrypoint: >
+      sh -c "certbot certonly --webroot -w /var/www/certbot
+      -d api.seudominio.com
+      --email seu@email.com
+      --agree-tos --non-interactive --keep-until-expiring"
+
+volumes:
+  logs:
+  certs:
+  certbot-www:
+
+networks:
+  web:
+    driver: bridge

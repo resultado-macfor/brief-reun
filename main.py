@@ -1,17 +1,13 @@
 import datetime
-
 from dotenv import load_dotenv
 load_dotenv()
-
 from flask import Flask, request
 from flask_restx import Api, Resource, fields
-
 from auth.jwt_handler import gerar_token
 from auth.middleware import requer_token
 from agent.analyzer import analisar_reuniao_com_rag
 from config.config import API_USERS, JWT_EXPIRATION_HOURS
 
-# App e Swagger
 app = Flask(__name__)
 
 authorizations = {

@@ -1,0 +1,17 @@
+[Unit]
+Description=Brief-Reun Flask API
+After=network.target
+
+[Service]
+User=www-data
+Group=www-data
+WorkingDirectory=/var/www/brief-reun
+EnvironmentFile=/var/www/brief-reun/.env
+ExecStart=/var/www/brief-reun/venv/bin/gunicorn -c gunicorn.conf.py wsgi:app
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
